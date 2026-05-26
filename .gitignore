@@ -1,0 +1,25 @@
+# Ambiente
+.env
+.env.local
+.env.*.local
+
+# Supabase — segredos locais (nunca commitar)
+supabase/.env
+supabase/.branches
+supabase/.temp
+
+# Node
+node_modules/
+dist/
+.next/
+.nuxt/
+.output/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDEs
+.vscode/
+.idea/
+*.swp
