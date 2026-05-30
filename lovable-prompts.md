@@ -1,72 +1,609 @@
-# Amparo — Prompts para Lovable
+# Prompts de Construção — Amparo
+## Sequência para Lovable
 
-Execute os prompts **em ordem**. Cada um constrói sobre o anterior.
-Antes de começar: conecte o projeto Supabase no painel do Lovable
-(Settings → Supabase → colar URL e anon key).
+> **Como usar:** Execute cada prompt em ordem. Não pule etapas.
+> Cada prompt assume que o anterior foi executado com sucesso.
+> Revise e teste o resultado antes de avançar.
 
 ---
 
-## PROMPT 1 — Fundação: Auth + Layout + Navegação
+## PROMPT 0 — Contexto Permanente do Projeto
+
+> Cole este bloco no campo de contexto/instruções do projeto no Lovable (fica ativo em todos os chats).
 
 ```
-Crie um app React + TypeScript chamado Amparo. É um Family Health Hub
-mobile-first para filhos adultos organizarem a saúde de pais idosos.
+Estou construindo o Amparo — um Family Health Hub SaaS mobile-first.
+
+Produto: Central operacional de saúde familiar para filhos adultos organizarem a saúde de pais idosos.
+Não é app de remédio. Não é prontuário médico. É coordenação familiar de saúde.
 
 Stack obrigatória:
-- Supabase Auth (email/senha + Google OAuth)
-- Supabase Postgres (já configurado)
-- Tailwind CSS
-- shadcn/ui
-- React Router DOM
-- React Query para data fetching
+- Frontend: Lovable (React + Tailwind)
+- Banco: Supabase Postgres
+- Auth: Supabase Auth
+- Storage: Supabase Storage
+- Permissões: Row Level Security (RLS) em todas as tabelas clínicas
+- Edge Functions: Supabase Edge Functions (operações com service_role)
+- Deploy: Vercel
 
-Design:
-- Mobile-first, mas responsivo até desktop
-- Paleta: branco, cinza-50/100, azul-600 como cor primária,
-  vermelho-500 apenas para emergência e alertas críticos
-- Tipografia limpa, espaçamento generoso, sem poluição visual
-- Tom humano, acolhedor e confiável — não clínico, não frio
+Princípios inegociáveis:
+1. Mobile-first. Usuário típico: adulto 30-60 anos, celular, sob estresse.
+2. RLS em toda tabela com dado clínico. Nunca depender de filtro só no frontend.
+3. Dados clínicos usam soft delete (deleted_at), nunca deleção física.
+4. file_path no banco (nunca file_url). URL assinada gerada na aplicação.
+5. Busca de documentos sempre server-side via coluna gerada search_vector. Nunca carregar tudo no client.
+6. Log de emergência via Edge Function com service_role. Nunca UPDATE direto do client público.
+7. Ações em cards via botão ⋮ com bottom sheet. Nunca swipe-to-reveal.
+8. Upload mobile: câmera + galeria. Drag & drop só no desktop.
+9. Nunca aceitar HEIC no upload — usar apenas JPEG, PNG e PDF.
+10. Schema obrigatório do campo schedule em medications: { "times": ["08:00", "14:00"] } — nunca usar outro formato ou chave diferente.
+11. Nunca verificar existência de e-mail no frontend para decidir branch de convite — exibir sempre os dois botões.
 
-Estrutura de rotas:
-/ → redireciona para /login se não autenticado, /dashboard se autenticado
-/login → tela de login (email/senha + botão Google)
-/register → cadastro com nome completo, email, senha
-/onboarding → fluxo de 5 passos (implementar depois)
-/dashboard → home principal (implementar depois)
-/familia/:familyId/* → rotas dos módulos (implementar depois)
-/emergencia/:token → página pública de emergência (implementar depois)
-/convite/:token → página pública de convite (implementar depois)
-/perfil → perfil do usuário logado (implementar depois)
+Variáveis de ambiente (configurar no Lovable antes de qualquer prompt):
+- VITE_SUPABASE_URL: URL do projeto Supabase
+- VITE_SUPABASE_ANON_KEY: chave anon pública do Supabase
+A Edge Function usa SUPABASE_SERVICE_ROLE_KEY (configurar nos secrets da Edge Function no Supabase).
 
-Crie:
-1. Cliente Supabase em src/integrations/supabase/client.ts usando
-   VITE_SUPABASE_URL e VITE_SUPABASE_ANON_KEY
+Dependências a instalar no projeto:
+- qrcode.react (geração de QR Code na Central de Emergência)
+- react-pdf (visualização de PDF com fallback window.open)
 
-2. AuthContext com useAuth() hook: user, session, signIn, signUp,
-   signOut, loading
+Pré-requisitos antes de executar qualquer prompt:
+- Projeto Supabase criado na região sa-east-1 (LGPD Brasil)
+- Extensão pgcrypto ativada no Supabase (necessária para gen_random_bytes)
+- Bucket medical-documents criado como PRIVADO no Supabase Storage
+- Domínios de redirect configurados no Supabase Auth (localhost + produção)
 
-3. ProtectedRoute component que redireciona para /login se não autenticado
+Bottom nav fixa: Home | Medicamentos | Agenda | Documentos | Família
+Perfil: avatar no header.
+FAB: bottom 72px (acima da nav).
+Botão Emergência: no card do familiar no dashboard. Ícone ⚡ discreto no header das outras telas.
+```
 
-4. Layout principal com:
-   - Bottom navigation bar no mobile com 5 ícones:
-     Home | Medicamentos | Agenda | Documentos | Família
-     (Perfil do usuário fica acessível pelo avatar no header, não na nav)
-   - Sidebar colapsável no desktop com os mesmos 5 itens + link para Perfil
-   - Header com:
-     · Seletor do familiar ativo (nome + foto em miniatura) — sticky,
-       visível em todas as telas do app
-     · Avatar do usuário logado no canto superior direito
-       (tap → menu: "Meu perfil" e "Sair")
-     · NÃO incluir botão de emergência no header — ele fica apenas
-       no dashboard para não criar duplicidade confusa
+---
 
-5. Telas de /login e /register com validação de campos
+## PROMPT 1 — Fundação: Banco de Dados e Autenticação
 
-6. Hook useFamilyContext() que mantém qual família (familyId) e qual
-   paciente (patientId) estão selecionados no momento — persiste no
-   localStorage para sobreviver a reloads
+```
+Crie a fundação completa do Amparo: banco de dados, autenticação e estrutura do projeto.
 
-Não implemente os módulos ainda, apenas a estrutura e navegação.
+## 1. Migration completa do banco (Supabase)
+
+Execute esta migration na ordem exata:
+
+-- TRIGGER de updated_at (reutilizado em todas as tabelas)
+create or replace function set_updated_at()
+returns trigger as $$
+begin
+  new.updated_at = now();
+  return new;
+end;
+$$ language plpgsql;
+
+-- PROFILES
+create table profiles (
+  id uuid primary key references auth.users(id) on delete cascade,
+  full_name text,
+  phone text,
+  photo_url text,
+  onboarding_step int default 0,  -- 0=conta criada, 1=família criada, 2=paciente criado, 3=completo
+  created_at timestamp default now(),
+  updated_at timestamp default now()
+);
+create trigger profiles_updated_at before update on profiles
+  for each row execute function set_updated_at();
+alter table profiles enable row level security;
+create policy "users can read own profile" on profiles for select
+  using (id = auth.uid());
+create policy "users can update own profile" on profiles for update
+  using (id = auth.uid());
+create policy "users can insert own profile" on profiles for insert
+  with check (id = auth.uid());
+
+-- FAMILIES
+create table families (
+  id uuid primary key default gen_random_uuid(),
+  name text not null,
+  created_by uuid references auth.users(id) on delete set null,
+  created_at timestamp default now(),
+  updated_at timestamp default now()
+);
+create trigger families_updated_at before update on families
+  for each row execute function set_updated_at();
+alter table families enable row level security;
+
+-- FAMILY_MEMBERS
+create table family_members (
+  id uuid primary key default gen_random_uuid(),
+  family_id uuid references families(id) on delete cascade,
+  user_id uuid references auth.users(id) on delete cascade,
+  role text not null check (role in ('admin', 'editor', 'viewer', 'caregiver')),
+  status text not null check (status in ('invited', 'active', 'removed')),
+  invited_by uuid references auth.users(id) on delete set null,
+  created_at timestamp default now(),
+  updated_at timestamp default now(),
+  unique (family_id, user_id)
+);
+create index idx_family_members_family_id on family_members(family_id);
+create index idx_family_members_user_id on family_members(user_id);
+create trigger family_members_updated_at before update on family_members
+  for each row execute function set_updated_at();
+alter table family_members enable row level security;
+
+-- INVITATIONS
+create table invitations (
+  id uuid primary key default gen_random_uuid(),
+  family_id uuid references families(id) on delete cascade,
+  token text unique not null default encode(gen_random_bytes(32), 'hex'),
+  email text,
+  role text not null check (role in ('admin', 'editor', 'viewer', 'caregiver')),
+  invited_by uuid references auth.users(id) on delete set null,
+  status text not null check (status in ('pending', 'accepted', 'expired')),
+  expires_at timestamp not null,
+  created_at timestamp default now()
+);
+create index idx_invitations_token on invitations(token);
+alter table invitations enable row level security;
+
+-- PATIENTS
+create table patients (
+  id uuid primary key default gen_random_uuid(),
+  family_id uuid references families(id) on delete restrict,
+  name text not null,
+  photo_url text,
+  birth_date date,
+  blood_type text check (blood_type in ('A+','A-','B+','B-','AB+','AB-','O+','O-','unknown')),
+  height numeric,
+  weight numeric,
+  health_insurance_name text,
+  health_insurance_number text,
+  preferred_hospital text,
+  notes text,
+  created_by uuid references auth.users(id) on delete set null,
+  deleted_at timestamp,
+  deleted_by uuid references auth.users(id),
+  created_at timestamp default now(),
+  updated_at timestamp default now()
+);
+create index idx_patients_family_id on patients(family_id);
+create index idx_patients_deleted_at on patients(deleted_at);
+create trigger patients_updated_at before update on patients
+  for each row execute function set_updated_at();
+alter table patients enable row level security;
+
+-- PATIENT_CONDITIONS
+create table patient_conditions (
+  id uuid primary key default gen_random_uuid(),
+  patient_id uuid references patients(id) on delete cascade,
+  name text not null,
+  description text,
+  diagnosed_at date,
+  status text check (status in ('active', 'inactive', 'unknown')),
+  deleted_at timestamp,
+  deleted_by uuid references auth.users(id),
+  created_at timestamp default now(),
+  updated_at timestamp default now()
+);
+create index idx_patient_conditions_patient_id on patient_conditions(patient_id);
+create index idx_patient_conditions_deleted_at on patient_conditions(deleted_at);
+alter table patient_conditions enable row level security;
+
+-- PATIENT_ALLERGIES
+create table patient_allergies (
+  id uuid primary key default gen_random_uuid(),
+  patient_id uuid references patients(id) on delete cascade,
+  allergy text not null,
+  severity text check (severity in ('low', 'medium', 'high', 'critical')),
+  notes text,
+  deleted_at timestamp,
+  deleted_by uuid references auth.users(id),
+  created_at timestamp default now()
+);
+create index idx_patient_allergies_patient_id on patient_allergies(patient_id);
+create index idx_patient_allergies_deleted_at on patient_allergies(deleted_at);
+alter table patient_allergies enable row level security;
+
+-- EMERGENCY_CONTACTS
+create table emergency_contacts (
+  id uuid primary key default gen_random_uuid(),
+  patient_id uuid references patients(id) on delete cascade,
+  name text not null,
+  relationship text,
+  phone text,
+  email text,
+  priority int default 1,
+  deleted_at timestamp,
+  deleted_by uuid references auth.users(id),
+  created_at timestamp default now()
+);
+create index idx_emergency_contacts_patient_id on emergency_contacts(patient_id);
+create index idx_emergency_contacts_deleted_at on emergency_contacts(deleted_at);
+alter table emergency_contacts enable row level security;
+
+-- MEDICATIONS
+create table medications (
+  id uuid primary key default gen_random_uuid(),
+  patient_id uuid references patients(id) on delete cascade,
+  name text not null,
+  generic_name text,
+  dosage text,
+  frequency text,
+  schedule jsonb,  -- schema obrigatório: { "times": ["08:00", "14:00"] } — nunca usar outro formato
+  start_date date,
+  end_date date,
+  prescribed_by text,
+  status text not null check (status in ('active', 'paused', 'ended')),
+  notes text,
+  file_path text,
+  deleted_at timestamp,
+  deleted_by uuid references auth.users(id),
+  created_at timestamp default now(),
+  updated_at timestamp default now()
+);
+create index idx_medications_patient_id on medications(patient_id);
+create index idx_medications_status on medications(status);
+create index idx_medications_deleted_at on medications(deleted_at);
+create trigger medications_updated_at before update on medications
+  for each row execute function set_updated_at();
+alter table medications enable row level security;
+
+-- APPOINTMENTS
+create table appointments (
+  id uuid primary key default gen_random_uuid(),
+  patient_id uuid references patients(id) on delete cascade,
+  parent_appointment_id uuid references appointments(id) on delete set null,
+  type text not null check (type in ('consultation','exam','return','procedure','therapy','vaccine','other')),
+  title text not null,
+  scheduled_at timestamp not null,
+  location text,
+  address text,
+  map_url text,
+  doctor_name text,
+  specialty text,
+  responsible_user_id uuid references auth.users(id) on delete set null,
+  status text not null check (status in ('scheduled','confirmed','done','cancelled','rescheduled')),
+  notes text,
+  deleted_at timestamp,
+  deleted_by uuid references auth.users(id),
+  created_at timestamp default now(),
+  updated_at timestamp default now()
+);
+create index idx_appointments_patient_id on appointments(patient_id);
+create index idx_appointments_scheduled_at on appointments(scheduled_at);
+create index idx_appointments_status on appointments(status);
+create index idx_appointments_deleted_at on appointments(deleted_at);
+create trigger appointments_updated_at before update on appointments
+  for each row execute function set_updated_at();
+alter table appointments enable row level security;
+
+-- CLINICAL_EVENTS
+create table clinical_events (
+  id uuid primary key default gen_random_uuid(),
+  patient_id uuid references patients(id) on delete cascade,
+  appointment_id uuid references appointments(id) on delete set null,
+  event_date date not null,
+  type text not null check (type in (
+    'consultation','exam','hospitalization','surgery','symptom',
+    'fall_accident','medication_change','diagnosis','return',
+    'crisis','vaccine','family_note'
+  )),
+  title text not null,
+  description text,
+  severity text check (severity in ('low','medium','high','critical')),
+  created_by uuid references auth.users(id) on delete set null,
+  deleted_at timestamp,
+  deleted_by uuid references auth.users(id),
+  created_at timestamp default now(),
+  updated_at timestamp default now()
+);
+create index idx_clinical_events_patient_id on clinical_events(patient_id);
+create index idx_clinical_events_event_date on clinical_events(event_date);
+create index idx_clinical_events_deleted_at on clinical_events(deleted_at);
+create trigger clinical_events_updated_at before update on clinical_events
+  for each row execute function set_updated_at();
+alter table clinical_events enable row level security;
+
+-- DOCUMENTS
+create table documents (
+  id uuid primary key default gen_random_uuid(),
+  patient_id uuid references patients(id) on delete cascade,
+  uploaded_by uuid references auth.users(id) on delete set null,
+  title text not null,
+  type text not null check (type in (
+    'prescription','exam','report','medical_request','insurance_card',
+    'id_document','discharge','vaccine','medication_photo','other'
+  )),
+  file_path text not null,
+  file_mime_type text,
+  file_size_bytes bigint,
+  document_date date,
+  expiry_date date,
+  institution text,
+  doctor_name text,
+  clinical_event_id uuid references clinical_events(id) on delete set null,
+  tags text[],
+  ocr_text text,
+  ai_summary text,
+  search_vector tsvector generated always as (
+    to_tsvector('portuguese',
+      coalesce(title,'') || ' ' ||
+      coalesce(doctor_name,'') || ' ' ||
+      coalesce(institution,'') || ' ' ||
+      coalesce(ocr_text,'')
+    )
+  ) stored,
+  deleted_at timestamp,
+  deleted_by uuid references auth.users(id),
+  created_at timestamp default now(),
+  updated_at timestamp default now()
+);
+create index idx_documents_patient_id on documents(patient_id);
+create index idx_documents_type on documents(type);
+create index idx_documents_deleted_at on documents(deleted_at);
+create index idx_documents_fts on documents using gin(search_vector);
+create trigger documents_updated_at before update on documents
+  for each row execute function set_updated_at();
+alter table documents enable row level security;
+
+-- EMERGENCY_LINKS
+create table emergency_links (
+  id uuid primary key default gen_random_uuid(),
+  patient_id uuid references patients(id) on delete cascade,
+  token text unique not null default encode(gen_random_bytes(32), 'hex'),
+  expires_at timestamp,
+  is_active boolean default true,
+  access_count int default 0,
+  created_by uuid references auth.users(id) on delete set null,
+  created_at timestamp default now()
+);
+create index idx_emergency_links_token on emergency_links(token);
+alter table emergency_links enable row level security;
+
+-- ACCESS_LOGS
+create table access_logs (
+  id uuid primary key default gen_random_uuid(),
+  family_id uuid references families(id) on delete set null,
+  patient_id uuid references patients(id) on delete set null,
+  user_id uuid references auth.users(id) on delete set null,
+  emergency_link_id uuid references emergency_links(id) on delete set null,
+  action text not null,
+  resource_type text,
+  resource_id uuid,
+  ip_address text,
+  user_agent text,
+  created_at timestamp default now()
+);
+create index idx_access_logs_patient_id on access_logs(patient_id);
+create index idx_access_logs_created_at on access_logs(created_at);
+alter table access_logs enable row level security;
+
+## 2. RLS — Políticas base (aplique após as tabelas)
+
+-- Função auxiliar: verifica se user é membro ativo da família
+create or replace function is_family_member(fid uuid)
+returns boolean as $$
+  select exists (
+    select 1 from family_members
+    where family_id = fid
+    and user_id = auth.uid()
+    and status = 'active'
+  );
+$$ language sql security definer;
+
+-- Função auxiliar: verifica role mínimo do membro
+create or replace function has_family_role(fid uuid, roles text[])
+returns boolean as $$
+  select exists (
+    select 1 from family_members
+    where family_id = fid
+    and user_id = auth.uid()
+    and status = 'active'
+    and role = any(roles)
+  );
+$$ language sql security definer;
+
+-- FAMILIES: membro vê família, admin edita
+create policy "members can read families" on families for select
+  using (is_family_member(id));
+create policy "admins can update families" on families for update
+  using (has_family_role(id, array['admin']));
+create policy "authenticated can insert families" on families for insert
+  with check (auth.uid() is not null);
+
+-- FAMILY_MEMBERS: membro vê outros membros da família
+create policy "members can read family_members" on family_members for select
+  using (is_family_member(family_id));
+create policy "admins can manage family_members" on family_members for all
+  using (has_family_role(family_id, array['admin']));
+
+-- PATIENTS: membro lê, editor/admin edita, deleted_at IS NULL obrigatório
+create policy "members can read patients" on patients for select
+  using (is_family_member(family_id) and deleted_at is null);
+create policy "editors can insert patients" on patients for insert
+  with check (has_family_role(family_id, array['admin','editor']));
+create policy "editors can update patients" on patients for update
+  using (has_family_role(family_id, array['admin','editor']) and deleted_at is null);
+
+-- MEDICATIONS
+create policy "members can read medications" on medications for select
+  using (
+    patient_id in (select p.id from patients p where is_family_member(p.family_id))
+    and deleted_at is null
+  );
+create policy "editors can insert medications" on medications for insert
+  with check (
+    patient_id in (select p.id from patients p where has_family_role(p.family_id, array['admin','editor']))
+  );
+create policy "editors can update medications" on medications for update
+  using (
+    patient_id in (select p.id from patients p where has_family_role(p.family_id, array['admin','editor']))
+    and deleted_at is null
+  );
+
+-- APPOINTMENTS
+create policy "members can read appointments" on appointments for select
+  using (
+    patient_id in (select p.id from patients p where is_family_member(p.family_id))
+    and deleted_at is null
+  );
+create policy "editors can insert appointments" on appointments for insert
+  with check (
+    patient_id in (select p.id from patients p where has_family_role(p.family_id, array['admin','editor']))
+  );
+create policy "editors can update appointments" on appointments for update
+  using (
+    patient_id in (select p.id from patients p where has_family_role(p.family_id, array['admin','editor']))
+    and deleted_at is null
+  );
+
+-- CLINICAL_EVENTS
+create policy "members can read clinical_events" on clinical_events for select
+  using (
+    patient_id in (select p.id from patients p where is_family_member(p.family_id))
+    and deleted_at is null
+  );
+create policy "editors can insert clinical_events" on clinical_events for insert
+  with check (
+    patient_id in (select p.id from patients p where has_family_role(p.family_id, array['admin','editor']))
+  );
+create policy "editors can update clinical_events" on clinical_events for update
+  using (
+    patient_id in (select p.id from patients p where has_family_role(p.family_id, array['admin','editor']))
+    and deleted_at is null
+  );
+
+-- DOCUMENTS
+create policy "members can read documents" on documents for select
+  using (
+    patient_id in (select p.id from patients p where is_family_member(p.family_id))
+    and deleted_at is null
+  );
+create policy "editors can insert documents" on documents for insert
+  with check (
+    patient_id in (select p.id from patients p where has_family_role(p.family_id, array['admin','editor']))
+  );
+create policy "editors can update documents" on documents for update
+  using (
+    patient_id in (select p.id from patients p where has_family_role(p.family_id, array['admin','editor']))
+    and deleted_at is null
+  );
+
+-- PATIENT_CONDITIONS, PATIENT_ALLERGIES, EMERGENCY_CONTACTS
+-- Mesma lógica via join com patients → family_members
+create policy "members can read patient_conditions" on patient_conditions for select
+  using (patient_id in (select p.id from patients p where is_family_member(p.family_id)) and deleted_at is null);
+create policy "editors can insert patient_conditions" on patient_conditions for insert
+  with check (patient_id in (select p.id from patients p where has_family_role(p.family_id, array['admin','editor'])));
+create policy "editors can update patient_conditions" on patient_conditions for update
+  using (patient_id in (select p.id from patients p where has_family_role(p.family_id, array['admin','editor'])) and deleted_at is null);
+
+create policy "members can read patient_allergies" on patient_allergies for select
+  using (patient_id in (select p.id from patients p where is_family_member(p.family_id)) and deleted_at is null);
+create policy "editors can insert patient_allergies" on patient_allergies for insert
+  with check (patient_id in (select p.id from patients p where has_family_role(p.family_id, array['admin','editor'])));
+create policy "editors can update patient_allergies" on patient_allergies for update
+  using (patient_id in (select p.id from patients p where has_family_role(p.family_id, array['admin','editor'])) and deleted_at is null);
+
+create policy "members can read emergency_contacts" on emergency_contacts for select
+  using (patient_id in (select p.id from patients p where is_family_member(p.family_id)) and deleted_at is null);
+create policy "editors can insert emergency_contacts" on emergency_contacts for insert
+  with check (patient_id in (select p.id from patients p where has_family_role(p.family_id, array['admin','editor'])));
+create policy "editors can update emergency_contacts" on emergency_contacts for update
+  using (patient_id in (select p.id from patients p where has_family_role(p.family_id, array['admin','editor'])) and deleted_at is null);
+
+-- STORAGE — bucket medical-documents (executar no SQL Editor do Supabase após criar bucket como PRIVADO)
+-- create policy "members can access patient files" on storage.objects
+--   for all using (
+--     bucket_id = 'medical-documents'
+--     and (storage.foldername(name))[2] in (
+--       select p.id::text from patients p
+--       join family_members fm on fm.family_id = p.family_id
+--       where fm.user_id = auth.uid() and fm.status = 'active'
+--     )
+--   );
+
+-- Função RPC para verificar único admin (usada no Prompt 11 para bloquear exclusão de conta)
+create or replace function get_solo_admin_families(p_user_id uuid)
+returns table(family_id uuid) as $$
+  select fm.family_id
+  from family_members fm
+  where fm.user_id = p_user_id
+    and fm.role = 'admin'
+    and fm.status = 'active'
+    and fm.family_id in (
+      select family_id from family_members
+      where role = 'admin' and status = 'active'
+      group by family_id
+      having count(*) = 1
+    )
+$$ language sql security definer;
+
+-- EMERGENCY_LINKS: membro cria, leitura pública via token (tratada na Edge Function)
+create policy "members can manage emergency_links" on emergency_links for all
+  using (
+    patient_id in (
+      select p.id from patients p
+      join family_members fm on fm.family_id = p.family_id
+      where fm.user_id = auth.uid() and fm.status = 'active'
+    )
+  );
+
+-- ACCESS_LOGS: apenas service_role pode inserir (via Edge Function)
+
+## 3. Autenticação
+
+Configure Supabase Auth com:
+- E-mail/senha habilitado
+- Confirmar e-mail obrigatório
+- Criar trigger para inserir em profiles automaticamente ao signup:
+
+create or replace function handle_new_user()
+returns trigger as $$
+begin
+  insert into profiles (id, full_name)
+  values (new.id, new.raw_user_meta_data->>'full_name');
+  return new;
+end;
+$$ language plpgsql security definer;
+
+create trigger on_auth_user_created
+  after insert on auth.users
+  for each row execute function handle_new_user();
+
+## 4. Estrutura de pastas do projeto
+
+Organize o projeto com:
+/src
+  /components
+    /ui          -- shadcn/ui base
+    /layout      -- BottomNav, Header, FAB
+    /patients    -- cards e formulários de familiar
+    /medications -- lista, card, bottom sheet de ações
+    /appointments -- lista, formulário, fluxo de realizado
+    /documents   -- upload, viewer, busca
+    /emergency   -- página pública, botão, QR code
+    /family      -- membros, convites, permissões
+  /pages
+    /auth        -- login, registro, recuperação
+    /onboarding  -- 5 passos
+    /dashboard   -- home
+    /emergency-public -- página pública sem autenticação
+  /hooks         -- useFamily, usePatient, useDocuments etc.
+  /lib
+    /supabase    -- client, storage helpers, signed URLs
+    /utils
+
+## 5. Resultado esperado deste prompt
+
+Ao concluir:
+- Migration executada sem erros no Supabase
+- RLS ativo em todas as tabelas
+- Trigger de profiles funcionando
+- Estrutura de pastas criada
+- Cliente Supabase configurado
+- Rotas base definidas
+
+Não crie nenhuma UI ainda. Apenas fundação.
 ```
 
 ---
@@ -74,92 +611,111 @@ Não implemente os módulos ainda, apenas a estrutura e navegação.
 ## PROMPT 2 — Onboarding (5 passos)
 
 ```
-Implemente o fluxo de onboarding em /onboarding com 5 passos lineares.
-Mostre barra de progresso numérica (ex: "Passo 2 de 5") no topo.
+Crie o fluxo completo de onboarding do Amparo com 5 passos.
 
-REGRA DE NAVEGAÇÃO:
-- Passos 1, 2 e 3: obrigatórios, sem opção de pular
-- Passos 4 e 5: mostrar link "Preencher depois" no canto inferior esquerdo
-- Ao concluir (ou pular os passos opcionais): redireciona para /dashboard
+## Regras gerais
+- Mobile-first. Padding lateral mínimo 20px. Botões com altura mínima 52px.
+- Passos 1, 2 e 3 são obrigatórios.
+- Passo 4 é completamente opcional — botão "Preencher depois" sempre visível e igual em hierarquia ao botão principal.
+- Mostrar barra de progresso no topo (ex: "Passo 2 de 5").
+- Não bloquear o usuário por campos incompletos no passo 4.
 
-Tabelas Supabase envolvidas: families, family_members, patients,
-patient_conditions, patient_allergies, emergency_contacts
+## Passo 1 — Boas-vindas (tela, sem formulário)
 
----
+Visual:
+- Logo + ícone do Amparo
+- Título grande: "A saúde da sua família em um só lugar."
+- Subtítulo: "Organize remédios, exames, consultas e informações de emergência de quem você cuida."
+- CTA principal: "Começar organização" → vai para registro
+- Link discreto abaixo: "Já tenho conta → Entrar"
 
-Passo 1 — Boas-vindas (obrigatório):
-  Ilustração SVG simples centrada (família / coração / proteção — inline no código)
-  Título: "A saúde da sua família em um só lugar"
-  Subtítulo: "Organize remédios, exames, consultas e histórico de
-  quem você cuida."
-  Botão único: "Começar organização"
+## Passo 2 — Criar conta
 
----
+Campos:
+- Nome completo
+- E-mail
+- Senha (com confirmação)
 
-Passo 2 — Criar família (obrigatório):
-  Título: "Crie sua família"
-  Campo: Nome da família (ex: "Família Silva") — obrigatório
-  Select: Seu papel → filho(a) | cônjuge | cuidador | outro
-  Ao avançar: INSERT em families + INSERT em family_members com
-  role='admin' e status='active'
+Ao criar conta:
+- Inserir em auth.users via Supabase Auth
+- Trigger cria profile automaticamente (onboarding_step = 0)
+- Redirecionar para Passo 3
 
----
+## Passo 3 — Criar família (obrigatório)
 
-Passo 3 — Adicionar familiar cuidado (obrigatório):
-  Título: "Quem você quer organizar primeiro?"
-  Campos:
-  - Nome completo (obrigatório)
-  - Data de nascimento (date picker)
-  - Grau de parentesco (text: "pai", "mãe", "avó"...)
-  - Foto (opcional — botão "Adicionar foto" que abre:
-    · No mobile: escolha entre "Câmera" e "Galeria"
-    · No desktop: file picker padrão
-    Upload para bucket patient-photos)
-  Ao avançar: INSERT em patients
+Título: "Crie sua família"
+Campos:
+- Nome da família (ex: "Família Silva")
+- Seu papel: radio buttons horizontais
+  - Filho(a) / Cônjuge / Cuidador(a) / Outro
 
----
+Ao salvar:
+- INSERT em families com created_by = auth.uid()
+- INSERT em family_members com role = 'admin', status = 'active'
+- UPDATE profiles SET onboarding_step = 1 WHERE id = auth.uid()
+- Redirecionar para Passo 4
 
-Passo 4 — Dados críticos (opcional — exibir "Preencher depois"):
-  Título: "Preencha o essencial para emergências"
-  Subtítulo em cinza: "Esses dados aparecem na Central de Emergência.
-  Você pode adicionar agora ou depois."
+## Passo 4 — Adicionar familiar cuidado (obrigatório)
 
-  Usar separadores visuais com títulos de seção:
+Título: "Quem você quer organizar primeiro?"
+Campos:
+- Nome completo (obrigatório)
+- Foto (opcional — botão "Adicionar foto" com câmera/galeria)
+- Data de nascimento (date picker mobile-friendly)
+- Grau de parentesco: select
+  - Pai / Mãe / Avô / Avó / Cônjuge / Irmão(ã) / Outro
 
-  ── Para emergências ──────────────────────
-  Tipo sanguíneo (select: A+, A-, B+, B-, AB+, AB-, O+, O-, Não sei)
+Ao salvar:
+- INSERT em patients com family_id e created_by
+- UPDATE profiles SET onboarding_step = 2 WHERE id = auth.uid()
+- Redirecionar para Passo 5
 
-  Alergias conhecidas (campo "Importante para emergências"):
-    Input: digitar + pressionar Enter para adicionar como tag
-    Cada alergia adicionada aparece como badge removível
-    INSERT em patient_allergies com severity='high'
-    Exemplo de placeholder: "Ex: Penicilina, AAS, amendoim..."
+## Passo 5 — Dados críticos de emergência (opcional)
 
-  Condições médicas:
-    Mesmo padrão de tags
-    INSERT em patient_conditions com status='active'
-    Exemplo: "Ex: Hipertensão, Diabetes tipo 2..."
+Título: "Preencha o essencial para emergências"
+Subtítulo: "Essas informações ficam acessíveis em segundos durante uma emergência."
+Botão no topo direito: "Preencher depois →" (sem hierarquia inferior ao botão principal)
 
-  ── Convênio ──────────────────────────────
-  Nome do convênio (text)
-  Número da carteirinha (text)
+Dividido em blocos visuais separados por linha + título:
 
-  ── Contato de emergência (Importante) ────
-  Nome do contato (text)
-  Telefone (text com máscara)
-  INSERT em emergency_contacts com priority=1
+━━ Para emergências ━━
+- Tipo sanguíneo: select (A+, A-, B+, B-, AB+, AB-, O+, O-, Não sei)
+- Alergias: campo de tags (adicionar múltiplas)
 
-  Todos os campos são opcionais neste passo.
+━━ Condições médicas ━━
+- Campo de texto livre para adicionar condições (tags)
 
----
+━━ Convênio ━━
+- Nome do convênio
+- Número da carteirinha
 
-Passo 5 — Primeira ação (opcional — exibir "Preencher depois"):
-  Título: "Quase pronto! O que você quer organizar agora?"
-  4 opções com ícone em grid 2x2:
-  - "Adicionar medicamento" → /familia/:familyId/medicamentos/novo
-  - "Subir receita ou exame" → /familia/:familyId/documentos/novo
-  - "Criar consulta" → /familia/:familyId/agenda/novo
-  - "Ver meu painel" → /dashboard
+━━ Contato de emergência ━━
+- Nome / Parentesco / Telefone (com máscara)
+
+## Passo 6 — Primeira ação (tela final do onboarding)
+
+Título: "O que você quer organizar agora?"
+
+4 cards grandes com ícone + texto:
+- 💊 Adicionar medicamento → /medicamentos/novo
+- 📄 Subir receita ou exame → /documentos/novo
+- 📅 Criar consulta → /agenda/nova
+- 🆘 Criar resumo de emergência → /emergencia
+
+Abaixo: link "Ir para o início →" → /dashboard
+
+## Requisito crítico
+Ao finalizar o onboarding, o usuário deve ter:
+- Conta criada / Família criada (com ele como admin) / Pelo menos 1 paciente
+- UPDATE profiles SET onboarding_step = 3 ao completar o Passo 5 ou ao clicar "Preencher depois"
+- Redirecionamento para dashboard ou primeira ação escolhida
+
+## Lógica de retomada (ao fazer login)
+Se profiles.onboarding_step:
+- 0 → /onboarding/familia (Passo 3)
+- 1 → /onboarding/familiar (Passo 4)
+- 2 → /onboarding/emergencia (Passo 5)
+- >= 3 → /dashboard
 ```
 
 ---
@@ -167,411 +723,260 @@ Passo 5 — Primeira ação (opcional — exibir "Preencher depois"):
 ## PROMPT 3 — Dashboard (Home)
 
 ```
-Implemente a tela /dashboard como home principal do app.
+Crie a tela de Dashboard (Home) do Amparo.
 
-Deve responder visualmente às 7 perguntas do usuário:
-1. Quem está sendo cuidado?
-2. Existe algo urgente?
-3. Quais são os próximos compromissos?
-4. Quais medicamentos estão ativos?
-5. Há documentos recentes?
-6. Existem pendências familiares?
-7. Onde está o botão de emergência?
+## Layout geral
+- Header fixo: logo à esquerda + avatar do usuário à direita (acessa perfil)
+- Ícone ⚡ discreto no header (acessa emergência do paciente ativo)
+- Seletor de paciente sticky logo abaixo do header (quando família tem mais de 1 paciente)
+- Scroll vertical com os blocos abaixo
+- Bottom nav fixa: Home | Medicamentos | Agenda | Documentos | Família
+- FAB (+) fixo, bottom: 72px, right: 16px (acima da nav)
+- FAB abre bottom sheet com ações rápidas:
+  - Adicionar medicamento / Registrar consulta / Subir documento / Adicionar evento clínico
 
-SELETOR DE PACIENTE (sticky):
-  Se a família tem mais de 1 paciente: exibir seletor ACIMA dos cards,
-  fixo (sticky top) abaixo do header, visível mesmo ao rolar a página.
-  Formato: abas horizontais com foto + nome curto de cada paciente.
-  O seletor atualiza todos os cards ao trocar de paciente.
-  Se só tem 1 paciente: não exibir o seletor (sem ocupar espaço).
+## Seletor de paciente (sticky)
+- Aparece apenas quando há mais de 1 paciente na família
+- Tabs horizontais com foto miniatura + nome de cada paciente
+- Sticky abaixo do header, nunca dentro dos cards
+- Trocar de paciente atualiza todos os blocos abaixo
 
-Layout mobile (cards empilhados verticalmente com gap de 12px):
+## Bloco 1 — Card do familiar
+- Foto circular grande + nome + idade
+- Alertas críticos (badge vermelho se: alergia crítica cadastrada, medicamento sem horário, perfil incompleto)
+- Botão primário vermelho: "🆘 Emergência" (abre página de emergência)
+- Botão secundário: "Ver perfil completo"
 
----
+## Bloco 2 — Próximos compromissos
+- Mostrar: hoje + próximos 7 dias
+- Cada item: tipo (ícone) + título + data/hora + responsável (avatar)
+- Estado vazio: "Nenhum compromisso agendado — Agendar consulta +"
+- Máximo 3 itens visíveis + "Ver todos →"
 
-CARD 1 — Familiar ativo:
-  Foto circular (80px) + Nome completo + Idade calculada + tipo sanguíneo
-  Badges em linha: alergias críticas (fundo vermelho, texto branco),
-  condições ativas (fundo azul-100, texto azul-800)
-  Botão vermelho proeminente "🚨 Emergência" centralizado abaixo dos badges
-  Este é o ÚNICO botão de emergência do app — não duplicar no header.
+## Bloco 3 — Medicamentos ativos
+- Lista dos medicamentos com status = 'active' e deleted_at IS NULL
+- Cada item: nome + dosagem + horários do dia
+- Máximo 4 itens + "Ver todos →"
+- Estado vazio: "Nenhum medicamento cadastrado — Adicionar +"
 
-CARD 2 — Alertas (condicional — só renderizar se houver pendências):
-  Fundo amarelo-50, borda esquerda amarela-400, ícone ⚠
-  Lista de pendências geradas por query cruzada:
-  - Medicamento ativo sem horário definido (schedule IS NULL)
-  - Perfil sem contato de emergência
-  - Consulta agendada sem responsável definido
-  - Perfil sem tipo sanguíneo
-  - Perfil sem alergias registradas
-  Cada item clicável leva direto ao local de correção.
+## Bloco 4 — Pendências
+- Aparece apenas se houver pendências
+- Exemplos: perfil de emergência incompleto, consulta sem responsável, medicamento sem horário
+- Visual: fundo amarelo suave, ícone de aviso
 
-CARD 3 — Próximos compromissos:
-  Header: "Agenda" + link "Ver tudo" (→ /familia/:id/agenda)
-  Query: appointments WHERE patient_id = ? AND scheduled_at > now()
-  AND status NOT IN ('cancelled', 'done') ORDER BY scheduled_at ASC LIMIT 3
-  Cada item: ícone por tipo, data/hora formatada ("Amanhã, 14h" ou
-  "Sex 23/05, 10h"), título, avatar do responsável
-  Estado vazio: ícone + "Nenhum compromisso agendado" + botão "Agendar"
+## Bloco 5 — Linha do tempo recente
+- Últimos 3 clinical_events com deleted_at IS NULL
+- Cada item: data + ícone do tipo + título + gravidade (badge)
+- "Ver histórico completo →"
 
-CARD 4 — Medicamentos de hoje:
-  Header: "Medicamentos de hoje" + link "Ver todos"
-  Query: medications WHERE patient_id = ? AND status = 'active'
-  Para cada um: nome + dosagem + horários do dia (do schedule jsonb)
-  Se schedule IS NULL: exibir badge "Sem horário" em amarelo
-  Badge por horário: "Tomado" (verde) ou "Pendente" (cinza) via medication_logs
-  Estado vazio: ícone + "Nenhum medicamento cadastrado" + botão "Cadastrar"
+## Bloco 6 — Documentos recentes
+- Últimos 3 documentos com deleted_at IS NULL
+- Cada item: ícone do tipo + título + data
+- "Ver todos os documentos →"
 
-CARD 5 — Documentos recentes:
-  Header: "Documentos" + link "Ver todos"
-  Query: documents WHERE patient_id = ? ORDER BY created_at DESC LIMIT 3
-  Cada item: ícone por type, título, data formatada
-  Estado vazio: ícone + "Nenhum documento enviado" + botão "Subir documento"
-
-CARD 6 — Família:
-  Header: "Família" + link "Gerenciar"
-  Avatares em linha (máx 5, depois "+N") dos family_members WHERE status='active'
-  Texto: "N membros com acesso"
-
----
-
-FAB (Floating Action Button):
-  Botão "+" fixo, posicionado bottom: 72px (ACIMA da bottom nav), right: 16px
-  Ao clicar: bottom sheet com 4 opções:
-  "💊 Novo medicamento" | "📅 Nova consulta" |
-  "📄 Subir documento" | "📋 Novo evento clínico"
-
----
-
-Performance:
-  useQuery para cada card independentemente (carregam em paralelo).
-  Skeleton loader por card enquanto carrega.
-  Não usar loading global — cada card carrega de forma independente.
+## Regras técnicas
+- Todos os dados carregados com skeleton loading (nunca tela em branco)
+- Queries filtradas por patient_id do paciente ativo
+- Filtro de deleted_at IS NULL em todas as queries
+- Sem IMC calculado ou exibido em nenhum lugar
 ```
 
 ---
 
-## PROMPT 4 — Módulo Medicamentos
+## PROMPT 4 — Módulo de Medicamentos
 
 ```
-Implemente o módulo de medicamentos em /familia/:familyId/medicamentos
+Crie o módulo completo de Medicamentos do Amparo.
 
-Tabelas: medications, medication_logs, medication_change_history
+## Tela principal — Lista de medicamentos (/medicamentos)
 
----
+Tabs: "Ativos" | "Pausados" | "Encerrados"
+Card de medicamento: nome + nome genérico + dosagem + frequência + próximo horário + badge de status + botão ⋮
 
-Tela principal /medicamentos:
-  Abas: "Ativos" | "Pausados" | "Encerrados"
-  Cada medicamento em card com:
-  - Nome + dosagem + frequência
-  - Próximos horários do dia (do schedule jsonb)
-  - Status badge colorido
-  - Botão de check "✓ Marcar como tomado" para o horário atual
+## Ações via botão ⋮ (bottom sheet — NUNCA swipe)
+- ✏️ Editar / ⏸ Pausar ou ▶️ Reativar / ✅ Encerrar uso / 🗑 Remover (soft delete + confirmação)
 
-  AÇÕES POR MEDICAMENTO:
-  NÃO usar swipe (pouco intuitivo no mobile web).
-  Usar botão "⋮" (três pontos verticais) no canto superior direito
-  do card → abre bottom sheet com:
-  - Editar
-  - Pausar (status → 'paused')
-  - Encerrar (status → 'ended', com confirmação)
-  - Ver histórico completo
+Confirmação de remoção:
+- Modal: "Remover [nome]? Este medicamento será arquivado."
+- Ao confirmar: set deleted_at = now(), deleted_by = auth.uid()
 
-  Botão "+" no header para novo medicamento.
+## Formulário — Adicionar/Editar medicamento
 
----
+Campos:
+- Nome do medicamento (obrigatório)
+- Nome genérico (opcional)
+- Dosagem (ex: "500mg")
+- Frequência: select (1x ao dia / 2x ao dia / 3x ao dia / 4x ao dia / A cada 6h / A cada 8h / A cada 12h / Conforme necessário / Outro)
+- Horários: aparece se frequência não for "Conforme necessário" ou "Outro"
+  - Time pickers para cada horário de acordo com a frequência selecionada
+  - Ao salvar, construir o campo schedule SEMPRE no formato: { "times": ["08:00", "14:00"] }
+  - Nunca usar outro formato, outra chave ou estrutura diferente para o campo schedule
+- Data de início / Data de término prevista (opcional) / Médico que prescreveu / Observações
+- Foto da caixa ou receita (opcional):
+  - Mobile: botão "Tirar foto" + "Escolher da galeria" (aceitar apenas JPEG, PNG e PDF — NÃO aceitar HEIC)
+  - Desktop: área de drag & drop + seleção de arquivo (aceitar apenas JPEG, PNG e PDF)
+  - Upload para Supabase Storage, salvar file_path no banco
 
-Tela /medicamentos/novo e /medicamentos/:id/editar:
-  Formulário em seções com título de seção separador:
-
-  ── Identificação ─────────────────────────
-  Nome do medicamento (text, obrigatório)
-  Nome genérico/substituto (text, opcional)
-  Dosagem: campo de texto livre (ex: "50mg", "10 gotas")
-  Forma: select (comprimido, cápsula, gotas, xarope, injeção,
-  adesivo, outro)
-  Upload de foto da caixa ou receita:
-    · Mobile: "📷 Câmera" ou "🖼 Galeria" (input accept="image/*")
-    · Desktop: file picker + preview
-    Upload para bucket medication-photos
-
-  ── Posologia ─────────────────────────────
-  Frequência: select (1x/dia, 2x/dia, 3x/dia, 4x/dia,
-  conforme necessário, outro)
-  Horários: renderizar N time pickers baseado na frequência escolhida
-    · 1x/dia → 1 time picker
-    · 2x/dia → 2 time pickers
-    · conforme necessário → nenhum time picker (schedule = null)
-    · outro → input de texto livre para descrever
-  Os horários são salvos como jsonb: [{"time": "08:00"}, {"time": "20:00"}]
-
-  ── Período ───────────────────────────────
-  Data de início (date picker, default: hoje)
-  Data de fim (date picker, opcional — deixar em branco = uso contínuo)
-  Médico prescritor (text)
-
-  ── Observações ───────────────────────────
-  Notas livres (textarea, placeholder: "Tomar com água, evitar sol...")
-
-  Ao salvar EDIÇÃO (não criação): INSERT em medication_change_history
-  para cada campo alterado:
-  { field_changed, old_value, new_value, changed_by: auth.uid() }
-
----
-
-Tela /medicamentos/:id:
-  Nome + dosagem + todos os campos em modo leitura
-  Botão "Editar" no header
-
-  Seção "Histórico de tomadas — últimos 30 dias":
-    Calendário visual compacto (grade de dias):
-    · Verde: tomado (medication_logs.status = 'taken')
-    · Vermelho: perdido (status = 'missed')
-    · Cinza claro: sem registro ou futuro
-    · Sem cor: antes do start_date do medicamento
-    Abaixo do calendário: lista dos últimos 10 logs com horário e
-    quem registrou (logged_by → profiles.full_name)
-
-  Seção "Histórico de alterações":
-    medication_change_history em linha do tempo
-    Cada item: campo alterado, valor antigo → valor novo, quem alterou, quando
-
-  Botão "Encerrar medicamento" (vermelho, ao final da tela):
-    Modal de confirmação: "Encerrar [nome]? O histórico será preservado."
-    Confirmar → status = 'ended'
+## Regras técnicas
+- Queries com WHERE deleted_at IS NULL
+- Soft delete obrigatório (nunca DELETE físico)
+- Foto salva em Storage path: patients/{patient_id}/medications/{medication_id}/{filename}
+- URL da foto gerada via createSignedUrl, nunca armazenada no banco
+- Sem swipe-to-reveal em nenhuma interação
+- Campo schedule salvo SEMPRE como { "times": ["HH:MM", ...] } — validar antes do INSERT/UPDATE
 ```
 
 ---
 
-## PROMPT 5 — Módulo Agenda Médica
+## PROMPT 5 — Módulo de Agenda
 
 ```
-Implemente o módulo de agenda em /familia/:familyId/agenda
+Crie o módulo completo de Agenda do Amparo.
 
-Tabela: appointments (vinculação com documents, clinical_events)
+## Tela principal — Lista de compromissos (/agenda)
 
----
+Tabs: "Próximos" | "Realizados" | "Cancelados"
+Card: ícone do tipo + título + data/hora + local + avatar do responsável + badge de status + botão ⋮
 
-Tela principal /agenda:
-  Toggle no header: "Lista" | "Calendário"
+## Ações via botão ⋮ (bottom sheet)
+- ✅ Marcar como realizado (fluxo em 2 etapas — ver abaixo)
+- ✏️ Editar
+- 📋 Criar retorno — exibir APENAS se parent_appointment_id IS NULL (profundidade máxima: 1 nível)
+- 🗑 Remover (soft delete + confirmação)
 
-  Visualização Lista:
-    Seções agrupadas: "Hoje" | "Esta semana" | "Próximos" | "Realizados"
-    Cada item: ícone por type, data/hora, título, especialidade,
-    avatar do responsável, status badge
-    Tap → detalhe
+## Fluxo "Marcar como realizado" — 2 etapas obrigatórias
 
-  Visualização Calendário:
-    Calendário mensal, pontos coloridos nos dias com eventos
-    Tap no dia → bottom sheet "peek" (meia tela) com lista dos eventos
-    do dia; tap no evento → detalhe completo
+Etapa 1 — Modal simples:
+- "Confirmar que esta consulta foi realizada?"
+- Ao confirmar:
+  1. UPDATE appointments SET status = 'done'
+  2. Verificar se já existe clinical_event com appointment_id = :id (evitar duplicata)
+  3. Se não existir: INSERT em clinical_events com appointment_id preenchido, type = 'consultation'
 
-  Filtro por tipo (chips horizontais roláveis abaixo do toggle):
-  Todos | Consulta | Exame | Retorno | Procedimento | Vacina | Fisioterapia
+Etapa 2 — Banner não-bloqueante (aparece após fechar o modal):
+- Texto: "Quer registrar as orientações desta consulta?"
+- Botões: "Agora" → formulário de evento clínico | "Depois" → fecha banner
+- Some automaticamente após 8 segundos
 
----
+## Formulário — Adicionar/Editar compromisso
 
-Tela /agenda/novo e /agenda/:id/editar:
-  Tipo (select com ícones): consulta, exame, retorno, procedimento,
-  fisioterapia, vacina, outro
+Campos:
+- Tipo com ícones: 🩺 Consulta / 🔬 Exame / 🔁 Retorno / 🏥 Procedimento / 🤸 Fisioterapia / 💉 Vacinação / 📋 Outro
+- Título (obrigatório) / Data e hora / Local / Endereço / Link de mapa
+- Médico/profissional / Especialidade
+- Responsável por acompanhar: select com membros ativos da família
+- Status: select (agendado / confirmado / cancelado / remarcado) — NÃO incluir na criação; novos compromissos sempre começam como 'scheduled'
+- Observações
 
-  Se type = 'return': mostrar campo adicional
-  "Retorno de qual consulta?" (select de appointments WHERE status='done'
-  do mesmo paciente, preenche parent_appointment_id)
+Se tipo = 'return' e vier de "Criar retorno": preencher parent_appointment_id automaticamente
 
-  Título (text, obrigatório)
-  Data e horário (datetime picker)
-  Médico/profissional (text)
-  Especialidade (text)
-  Local — nome do local (text)
-  Endereço (text)
-  Link do mapa (URL — ao salvar, abrir com Google Maps)
-  Responsável por acompanhar (select dos family_members com status='active')
-  Notas (textarea)
-  Documentos anexos (upload → bucket documents, INSERT em documents
-  com appointment_id preenchido)
-
-  NOTA: NÃO incluir campo "Status" no formulário de criação.
-  Novos compromissos sempre começam como 'scheduled'.
-  Status é alterado apenas na tela de detalhe.
-
----
-
-Tela /agenda/:id:
-  Todos os campos em modo leitura + botão "Editar" no header
-  Seção de documentos anexos com preview/download
-
-  Botão "Marcar como realizado":
-    PASSO 1 — Confirmar (tap no botão):
-      Modal simples: "Marcar [título] como realizado?"
-      Confirmar → status = 'done', INSERT em clinical_events com
-      type='consultation', appointment_id = this.id
-      Toast: "Consulta registrada no histórico ✓"
-
-    PASSO 2 — Opcional (banner após confirmação, NÃO bloqueia o usuário):
-      Banner azul: "Quer registrar as orientações médicas desta consulta?"
-      Botão "Registrar agora" → abre formulário de clinical_event
-      pré-preenchido com appointment_id
-      Botão "Agora não" → dismiss do banner
-
-  Botão "Agendar retorno" (secundário):
-    Abre /agenda/novo pré-preenchido com type='return' e
-    parent_appointment_id = this.id
+## Regras técnicas
+- Soft delete obrigatório
+- Verificar existência de clinical_event antes de criar ao marcar como realizado
+- Botão "Criar retorno" visível apenas em appointments com parent_appointment_id IS NULL
 ```
 
 ---
 
-## PROMPT 6 — Módulo Histórico Clínico
+## PROMPT 6 — Módulo de Histórico Clínico
 
 ```
-Implemente o histórico clínico em /familia/:familyId/historico
+Crie o módulo de Histórico Clínico do Amparo.
 
-Tabela: clinical_events (com joins em documents, appointments)
+## Tela principal — Linha do tempo (/historico)
 
----
+- Filtros como chips horizontais: tipo + gravidade
+- FAB (+) para adicionar evento
+- Lista cronológica decrescente com deleted_at IS NULL
+- Barra de busca
 
-Tela principal /historico:
-  Barra de busca no topo (sempre visível)
-  Busca server-side com debounce de 300ms em title e description
+Card de evento:
+- Linha vertical colorida à esquerda (cor por gravidade: cinza/azul/laranja/vermelho)
+- Data + ícone do tipo + título + badge de gravidade + quem registrou
+- Botão ⋮ → Editar | Arquivar (soft delete)
 
-  Botão "Filtrar" ao lado da busca → abre bottom sheet com:
-  - Por tipo (checkboxes múltiplos)
-  - Por severidade (checkboxes múltiplos)
-  - Por período (range picker de datas)
-  - Botão "Aplicar filtros"
-  (Não usar chips permanentes — economizam espaço vertical)
+## Formulário — Adicionar evento clínico
 
-  Linha do tempo vertical abaixo da busca:
-  Layout: data curta à esquerda (ex: "15 mar") + card à direita
-  Ícone colorido por tipo no início do card:
-    cirurgia=vermelho, vacina=verde, consulta=azul,
-    internação=roxo, sintoma=amarelo, queda=laranja, outro=cinza
-  Card: título, descrição resumida (máx 2 linhas), badge de severidade
-  Se severity = 'high' ou 'critical': borda esquerda colorida no card
-  Thumbnails clicáveis de documentos vinculados abaixo da descrição
+Campos:
+- Tipo: select com 12 opções em pt-BR (consulta, exame, internação, cirurgia, sintoma, queda/acidente, alteração de medicamento, diagnóstico, retorno médico, crise, vacina, observação familiar)
+- Data do evento / Título (obrigatório) / Descrição
+- Gravidade: radio buttons coloridos ⚪ Baixa | 🔵 Média | 🟠 Alta | 🔴 Crítica
+- Tags (campo livre, múltiplas) / Médico relacionado
 
-  Botão "+" fixo, bottom: 72px, right: 16px para novo evento
-
----
-
-Tela /historico/novo e /historico/:id/editar:
-  Data do evento (date picker, default: hoje)
-  Tipo (select com ícones):
-    consulta, exame, internação, cirurgia, sintoma relevante,
-    queda/acidente, alteração de medicamento, diagnóstico,
-    retorno médico, crise, vacina, observação familiar, outro
-  Título (text, obrigatório)
-  Descrição (textarea)
-  Gravidade — exibir como 4 botões com cor de fundo:
-    [🟢 Baixa] [🟡 Média] [🟠 Alta] [🔴 Crítica]
-    (não usar select — a visualização de cor ajuda na escolha)
-  Médico relacionado (text)
-  Tags (input: digitar + Enter para adicionar como badge removível)
-  Vincular à consulta (select de appointments, opcional)
-  Documentos:
-    · Mobile: "📷 Câmera" | "🖼 Galeria" | "📄 Arquivo"
-    · Desktop: drag & drop + file picker
-    Upload → bucket documents com clinical_event_id preenchido
-
----
-
-Tela /historico/:id:
-  Visualização completa com todos os campos
-  Galeria de documentos vinculados em grid 2 colunas
-  Rodapé: "Registrado por [nome]" + data/hora do created_at
-  Botão "Editar" visível apenas para roles: admin, editor
+## Regras técnicas
+- Queries com WHERE deleted_at IS NULL ORDER BY event_date DESC
+- Soft delete obrigatório (dados históricos de saúde)
+- Filtros aplicados server-side
+- Tipo validado via CHECK constraint no banco
 ```
 
 ---
 
-## PROMPT 7 — Módulo Documentos
+## PROMPT 7 — Módulo de Documentos
 
 ```
-Implemente o módulo de documentos em /familia/:familyId/documentos
+Crie o módulo completo de Documentos do Amparo.
 
-Tabela: documents
-Storage bucket: documents (path: {family_id}/{patient_id}/{uuid}.{ext})
+## Tela principal — Biblioteca de documentos (/documentos)
 
----
+- Barra de busca no topo (server-side com debounce 300ms)
+- Filtros: chips por tipo
+- Lista/grid de documentos com deleted_at IS NULL
+- FAB (+) para adicionar
+- Botão ⋮ por documento → Ver | Editar metadados | Compartilhar | Arquivar (soft delete)
 
-Tela principal /documentos:
-  Barra de busca no topo — busca SERVER-SIDE com debounce de 300ms.
-  Query Supabase: filtrar em title, doctor_name, institution e tags
-  NÃO fazer busca local — carregar todos os documentos e filtrar no
-  cliente é inviável com volume crescente.
+## Busca — regra crítica
+- Busca SEMPRE server-side via full-text search do Postgres
+- Usar a coluna gerada search_vector — não recalcular tsvector inline:
 
-  Botão "Filtrar" ao lado da busca → bottom sheet com:
-  - Por tipo: Receita | Exame | Laudo | Pedido médico | Carteirinha |
-    Documento pessoal | Alta hospitalar | Vacina | Outro
-  - Por período (range picker)
-  - Por médico/instituição (text)
+    SELECT * FROM documents
+    WHERE patient_id = :patient_id
+      AND deleted_at IS NULL
+      AND search_vector @@ plainto_tsquery('portuguese', :query)
+    ORDER BY document_date DESC NULLS LAST
+    LIMIT 20;
 
-  Visualização padrão: LISTA no mobile (1 coluna)
-    Cada item: ícone por tipo, título, data, badge de tipo
-  Visualização opcional: GRID (2 colunas no mobile, 3 no desktop)
-    Cada card: thumbnail para imagens, ícone de PDF para PDFs
-  Toggle lista/grid no header
+- NUNCA carregar todos os documentos no client para buscar localmente
 
-  Botão "+" para upload
+## Upload de documentos
 
----
+No mobile (viewport < 768px):
+- Dois botões grandes:
+  - 📷 "Tirar foto" → input type="file" accept="image/jpeg,image/png" capture="environment"
+  - 🖼 "Escolher da galeria" → input type="file" accept="image/jpeg,image/png,application/pdf"
+- NÃO aceitar HEIC — se o usuário tentar, exibir: "Formato não suportado. Tire uma foto pelo botão da câmera ou converta para JPG antes de subir."
+- Sem área de drag & drop
 
-Tela /documentos/novo (2 passos):
+No desktop (viewport >= 768px):
+- Área de drag & drop + botão "Selecionar arquivo"
+- Aceita apenas: JPEG, PNG e PDF (NÃO aceitar HEIC)
 
-  PASSO 1 — Upload:
-    No MOBILE: exibir 3 botões grandes empilhados:
-      [📷 Tirar foto com câmera]
-        input: type="file" accept="image/*" capture="environment"
-      [🖼 Escolher da galeria]
-        input: type="file" accept="image/*,application/pdf"
-      [📄 Selecionar arquivo]
-        input: type="file" accept="image/*,application/pdf,.tiff"
+Após seleção:
+- Preview da imagem ou ícone de PDF
+- Formulário de metadados aparece
+- Compressão de imagem client-side antes do upload (max 1920px, qualidade 85%)
+- Upload para: patients/{patient_id}/documents/{uuid}/{filename}
+- Salvar file_path no banco (nunca a URL direta)
 
-    No DESKTOP: área de drag & drop grande +
-    botão "Selecionar arquivo" centralizado
+## Formulário de metadados
 
-    Limite: 50MB. Mostrar preview:
-    - Imagem: img com max-height: 200px
-    - PDF: ícone de PDF + nome do arquivo + tamanho
-    Progress bar durante upload para bucket documents
-    Após upload bem-sucedido: salvar file_path, file_mime_type,
-    file_size_bytes → avançar para Passo 2
+Campos obrigatórios: Título + Tipo
+Campos opcionais (colapsados inicialmente):
+- Data do documento / Médico / Instituição / Validade / Tags / Observações
+- Vincular a evento clínico: select opcional
 
-  PASSO 2 — Classificar:
-    Campos OBRIGATÓRIOS (sempre visíveis):
-    - Título (text — obrigatório)
-    - Tipo (select com ícones — obrigatório)
+## Visualização de documento
 
-    Campos OPCIONAIS (inicialmente colapsados — link "Adicionar mais detalhes"):
-    - Data do documento (date picker)
-    - Médico/profissional (text)
-    - Instituição/clínica (text)
-    - Validade (date picker — campo expiry_date)
-    - Tags (input de tags)
-    - Observações (textarea)
-    - Vincular a consulta (select de appointments)
-    - Vincular a evento clínico (select de clinical_events)
+- Gerar URL assinada via createSignedUrl (expiração: 3600s)
+- PDF: react-pdf → se falhar, botão "Abrir PDF" via window.open(signedUrl)
+- Imagem: tag img com a URL assinada
+- Nunca usar iframe simples para PDF
 
-    Ao salvar: INSERT em documents com todos os campos preenchidos
-
----
-
-Tela /documentos/:id:
-  Visualizador de documento:
-    IMAGEM: img com pinch-to-zoom (usar biblioteca de zoom touch)
-    PDF: usar biblioteca react-pdf para renderizar inline
-      Em caso de falha no render: mostrar botão "Abrir PDF"
-      que executa window.open(signedUrl, '_blank') como fallback
-    Gerar URL via Supabase Storage createSignedUrl (expiração: 1 hora)
-
-  Metadados em painel abaixo (mobile) ou lateral (desktop):
-    Tipo, data, médico, instituição, tags, validade
-
-  Ações (botões no rodapé):
-    "⬇ Baixar" — gerar nova signed URL e iniciar download
-    "✏ Editar dados" — abre formulário inline de metadados
-    "🗑 Excluir" — apenas admin, modal de confirmação, soft delete
-      (não remover do storage imediatamente — marcar como deleted_at)
+## Regras técnicas
+- file_path salvo no banco, nunca file_url
+- Queries com WHERE deleted_at IS NULL
+- Soft delete obrigatório (documentos médicos não são deletados fisicamente)
+- Compressão de imagem client-side antes do upload
 ```
 
 ---
@@ -579,459 +984,371 @@ Tela /documentos/:id:
 ## PROMPT 8 — Central de Emergência
 
 ```
-Implemente a Central de Emergência. Este é o módulo mais crítico do app.
+Crie a Central de Emergência do Amparo — o módulo mais crítico do produto.
 
-Tabelas: emergency_links, access_logs
-Dados de: patients, patient_allergies, patient_conditions,
-emergency_contacts, medications (WHERE status='active')
+## A. Botão de emergência no dashboard
 
----
+No card do familiar no dashboard:
+- Botão vermelho grande: "🆘 Emergência" → navega para /emergencia/{patient_id}
 
-PARTE A — Modal interno (usuário autenticado):
+No header das outras telas (Medicamentos, Agenda, Documentos, Histórico):
+- Ícone ⚡ discreto (sem texto) no canto direito
+- NÃO criar dois botões vermelhos grandes. Apenas 1 (no card). O ⚡ é discreto.
 
-O botão vermelho "🚨 Emergência" do dashboard abre um MODAL FULL-SCREEN
-(não bottom sheet — em pânico o usuário não pode perder tempo em UI parcial).
+## B. Página de emergência — versão autenticada (/emergencia/{patient_id})
 
-O modal tem duas abas no topo: "Resumo" | "Compartilhar"
+- Card de preview dos dados (mesma ordem da página pública)
+- Se nenhum link ativo: botão "Gerar link de emergência"
+- Se link ativo:
+  - URL truncada + botão "Copiar link"
+  - Botão "Compartilhar" (Web Share API)
+  - QR Code gerado client-side (qrcode.react)
+  - Botão "Salvar QR Code" (download)
+  - Badge de expiração / Botão "Desativar link"
 
-ABA "Resumo" — informações críticas do paciente:
-  Layout otimizado para leitura rápida, fonte grande:
+Gerar link:
+- INSERT em emergency_links (token gerado pelo banco via DEFAULT, expires_at = now() + 7 days)
+- URL pública: https://app.amparo.com.br/e/{token}
 
-  ┌──────────────────────────────────────────┐
-  │ [Foto] João Silva  80 anos  O+           │
-  ├──────────────────────────────────────────┤
-  │ ⚠ ALERGIAS                              │
-  │   • Penicilina (GRAVE)                  │
-  │   • AAS (ALTA)                          │
-  ├──────────────────────────────────────────┤
-  │ 💊 MEDICAMENTOS ATIVOS                  │
-  │   • Losartana 50mg                      │
-  │   • Metformina 850mg                    │
-  ├──────────────────────────────────────────┤
-  │ 🏥 Unimed · 0123456789                  │
-  │ 🏨 Hospital das Clínicas               │
-  ├──────────────────────────────────────────┤
-  │ 📞 Maria (filha) · (11) 99999-9999     │
-  │    [Ligar agora]                        │
-  │ 📞 Dr. Carlos · (11) 88888-8888        │
-  │    [Ligar agora]                        │
-  └──────────────────────────────────────────┘
+## C. Página pública de emergência (/e/{token}) — sem autenticação
 
-  Botão "Ligar agora" usa href="tel:+5511..." para iniciar chamada direta.
+Regras de carregamento:
+1. Buscar emergency_link pelo token
+2. Validar: is_active = true AND (expires_at IS NULL OR expires_at > now())
+3. Se inválido: tela "Este link não está mais disponível"
+4. Se válido: chamar Edge Function (ver abaixo) para registrar acesso e obter dados
+5. Renderizar com os dados retornados pela Edge Function
 
-ABA "Compartilhar" — gerar link e QR Code:
-  Se já existe link ativo: exibir direto com opções de compartilhamento.
-  Se não existe: botão "Gerar link de emergência".
+ORDEM OBRIGATÓRIA das seções:
 
-  Ao gerar:
-    INSERT em emergency_links
-    (token gerado pelo banco via DEFAULT, expires_at = now() + 7 days)
-    IMPORTANTE: usar expires_at = 7 dias como padrão — 24h é insuficiente
-    para internações. O usuário pode ajustar.
+--- Seção 1: Identificação ---
+Foto circular grande + Nome completo + Idade calculada + Tipo sanguíneo (badge grande)
 
-  Exibir link gerado + opções de expiração:
-    [24 horas] [72 horas] [7 dias] [Sem expiração] ← seleção por chip
+--- Seção 2: ALERGIAS (destaque máximo) ---
+Fundo vermelho/laranja claro
+Título: "⚠ ALERGIAS" em vermelho escuro, negrito, caixa alta
+Lista com badge de severidade: Crítica=vermelho | Alta=laranja | Média=amarelo | Baixa=cinza
+Se sem alergias: "Nenhuma alergia cadastrada" em verde
 
-  Botões de ação:
-    [📋 Copiar link]
-    [💬 Compartilhar no WhatsApp]
-      → href="https://wa.me/?text=Informações+de+emergência+de+[nome]:+[url]"
-    [⬇ Baixar QR Code como PNG]
-    [🖨 Imprimir QR Code]
+--- Seção 3: Medicamentos ativos ---
+"💊 Medicamentos em uso" — nome + dosagem + frequência
+Apenas status = 'active' e deleted_at IS NULL
 
-  QR Code gerado com biblioteca qrcode.react.
-  QR Code deve ser grande o suficiente para ser lido a distância (min 200x200px).
+--- Seção 4: Condições médicas ---
+"📋 Condições de saúde" — patient_conditions com status = 'active'
 
----
+--- Seção 5: Convênio e hospital ---
+Nome do convênio + número da carteirinha + hospital de preferência
 
-PARTE B — Página pública /emergencia/:token (SEM autenticação):
+--- Seção 6: Contatos de emergência ---
+Lista ordenada por priority — nome + parentesco + telefone + botão "Ligar" (tel: link)
 
-Esta página é acessível por qualquer pessoa com o link.
-Otimizada para mobile e para conexão ruim.
+--- Seção 7: Documentos essenciais ---
+Últimos 5 documentos: título + tipo + data + botão "Ver" (signed URL da Edge Function)
 
-Ao carregar:
-  1. Buscar emergency_links WHERE token = :token
-  2. Validar: is_active = true AND (expires_at IS NULL OR expires_at > now())
-  3. Se inválido: tela "Link expirado ou inválido" com instruções para
-     pedir novo link ao familiar responsável
-  4. Se válido: carregar TODOS os dados do patient_id de uma vez
-     (não usar lazy loading nesta página)
+Design: sem navegação, apenas logo discreto no topo
+Disclaimer no rodapé: "Esta página é somente informativa e não substitui orientação médica profissional."
+Alto contraste, fonte grande (mínimo 16px)
 
-  5. Registrar acesso via Supabase Edge Function:
-     POST /functions/v1/log-emergency-access
-     Body: { token }
-     A Edge Function (service_role) faz:
-     - INSERT em access_logs com action='emergency_view'
-     - UPDATE emergency_links: access_count+1, last_accessed_at=now()
-     (Não fazer UPDATE direto do client — RLS bloquearia)
+Performance e cache:
+- Skeleton loading em todas as seções
+- Após carregamento: salvar seções críticas (identificação, alergias, medicamentos) no localStorage
+- Se offline: mostrar banner "⚠ Você está offline. Estas informações podem não estar atualizadas." + dados do cache
+- Cache válido por 24 horas
 
-Layout da página pública:
+## D. Edge Function — log de acesso (/functions/v1/log-emergency-access)
 
-  BANNER TOPO — fundo vermelho-600, texto branco:
-    "⚠ INFORMAÇÕES DE EMERGÊNCIA"
-    Nome do paciente em fonte grande (24px+)
+CORS obrigatório — incluir no início, antes de qualquer lógica:
 
-  As seções devem seguir ordem de prioridade médica:
+    const corsHeaders = {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+    }
+    if (req.method === 'OPTIONS') {
+      return new Response('ok', { headers: corsHeaders })
+    }
 
-  SEÇÃO 1 — Identificação básica:
-    Foto circular + Nome + Idade + Tipo sanguíneo em badge grande
+Incluir corsHeaders em TODAS as respostas retornadas. Sem CORS, a chamada falhará.
 
-  SEÇÃO 2 — ⚠ ALERGIAS (fundo vermelho-50, borda vermelha):
-    Exibir PRIMEIRO e em destaque — é a info mais crítica antes
-    de qualquer medicação ser administrada.
-    Se não há alergias: "Nenhuma alergia registrada" em verde.
+Lógica da Edge Function:
+1. Receber: { token, ip_address, user_agent }
+2. Buscar e validar emergency_link pelo token
+3. INSERT em access_logs com ip_address e user_agent
+4. UPDATE emergency_links SET access_count = access_count + 1
+5. Carregar dados do paciente e retornar patient_data com os campos permitidos:
+   - name, photo_url, birth_date, blood_type
+   - allergies: [{ allergy, severity }] — deleted_at IS NULL
+   - medications: [{ name, generic_name, dosage, frequency }] — status='active', deleted_at IS NULL
+   - conditions: [{ name }] — status='active'
+   - health_insurance_name, preferred_hospital
+   - emergency_contacts: [{ name, relationship, phone }] — ordered by priority, deleted_at IS NULL
+   - document_urls: [{ title, type, signed_url }] — máx 5 recentes, signed_url gerada pela Edge Function via service_role
+6. Para documentos: gerar signed URLs usando supabaseAdmin.storage.from('medical-documents').createSignedUrl()
+   (o client anônimo não pode assinar arquivos — obrigatório usar service_role aqui)
 
-  SEÇÃO 3 — 💊 Medicamentos ativos:
-    Nome + dosagem de cada um
+Chamar via:
+    const { data } = await supabase.functions.invoke('log-emergency-access', {
+      body: { token, ip_address, user_agent: navigator.userAgent }
+    })
 
-  SEÇÃO 4 — Condições médicas ativas
+A página pública NUNCA faz UPDATE direto. Sempre via esta Edge Function.
 
-  SEÇÃO 5 — 🏥 Convênio:
-    Nome + número da carteirinha (fonte grande, fácil de copiar)
-
-  SEÇÃO 6 — 📞 Contatos de emergência:
-    Nome + relação + botão "Ligar" (href="tel:...") para cada contato
-    Médico principal com botão de ligação
-
-  SEÇÃO 7 — 🏨 Hospital de preferência
-
-  RODAPÉ:
-    "Gerado via Amparo · [data/hora de geração do link]"
-    "Este resumo é para uso emergencial. Não substitui avaliação médica."
-
-  PERFORMANCE:
-    Não usar lazy loading.
-    Embutir CSS crítico (Tailwind purged) no bundle mínimo.
-    Página deve renderizar em menos de 2s em 3G.
+## Critérios de aceite
+- Página pública carrega em < 1,5 segundos
+- Ordem das seções exatamente como especificado
+- UPDATE de access_count APENAS via Edge Function
+- Cache funciona mesmo offline
+- QR Code disponível para download
+- Link pode ser desativado pelo admin
 ```
 
 ---
 
-## PROMPT 9 — Módulo Família e Permissões
+## PROMPT 9 — Módulo de Família e Permissões
 
 ```
-Implemente o módulo de família em /familia/:familyId/membros
+Crie o módulo de Família e Permissões do Amparo.
 
-Tabelas: family_members, invitations, profiles, access_logs
+## Tela principal — Membros da família (/familia)
 
----
+Card de membro: Avatar + nome + e-mail + badge do papel + "(você)" se for o próprio usuário
+Ações via botão ⋮ (admin only): Alterar papel | Remover da família (soft delete)
 
-Tela principal /membros:
-  Lista de membros com status='active':
-    Avatar + Nome (de profiles.full_name) + role badge + status
-    Roles com cores:
-      Admin=roxo | Editor=azul | Visualizador=cinza |
-      Cuidador=verde | Médico=teal
+4 papéis com tooltip explicativo:
+- Admin: gerencia família, convida e remove membros, edita tudo
+- Editor: adiciona e edita dados clínicos
+- Visualizador: apenas visualiza
+- Cuidador: acessa agenda, medicamentos e emergência
 
-  Seção separada "Convites pendentes":
-    invitations WHERE status='pending' AND expires_at > now()
-    Cada item: email, papel convidado, data de expiração
-    Botão "Reenviar" e "Cancelar" por convite
+## Fluxo de convite
 
-  Tap em membro → bottom sheet com opções (apenas admin vê as opções de gestão):
-    "Alterar papel" (select) — apenas admin
-    "Remover da família" — apenas admin, modal de confirmação
-    "Ver atividade recente" — abre log filtrado por esse membro
+Tela /familia/convidar:
+- Campo: E-mail do convidado (opcional — convite também por link)
+- Papel a atribuir (select com 4 papéis)
+- Ao gerar: INSERT em invitations (token, role, expires_at = now() + 7 dias)
+- Exibir link + botão "Copiar" + botão "Compartilhar" (Web Share API)
 
-  Botão "Convidar pessoa" no header
+## Página de aceite de convite (/convite/:token)
 
----
+Branch 1 — Usuário logado:
+- Verificar token válido e não expirado
+- Mostrar nome da família + papel
+- "Aceitar convite" → INSERT em family_members, UPDATE invitations status = 'accepted'
+- Redirecionar para /dashboard
 
-Modal "Convidar pessoa":
-  Campo: Email (obrigatório)
-  Select: Papel
-    Admin — Gerencia tudo
-    Editor — Adiciona e edita dados
-    Visualizador — Apenas consulta
-    Cuidador — Rotina, medicamentos e agenda
-    Médico — Acesso temporário a resumo e documentos
+Branch 2 — Usuário não logado (qualquer caso):
+- NUNCA verificar no frontend se o e-mail já existe no sistema — isso expõe existência de usuários
+- Mostrar SEMPRE os dois botões:
+  - Botão principal: "Criar conta" → /register?invite={token}
+  - Botão secundário: "Já tenho conta → Entrar" → /login?invite={token}
+- Token preservado via query param durante TODO o fluxo de registro/login
+- Após criar conta ou fazer login: aceitar convite automaticamente e redirecionar para /dashboard
 
-  Ao confirmar:
-    INSERT em invitations (email, role, invited_by, expires_at = now() + 7 dias)
-    Exibir link do convite + botão:
-      [📋 Copiar link]
-      [💬 Compartilhar no WhatsApp]
-        → href="https://wa.me/?text=Você foi convidado para o Amparo:+[url]"
+## Perfil do usuário (/perfil)
 
----
+Acessível pelo avatar no header.
 
-Tela pública /convite/:token (SEM autenticação):
-  Buscar invitation WHERE token = :token AND status='pending'
-  AND expires_at > now()
+Campos editáveis: Foto (câmera/galeria) + Nome completo + Telefone
 
-  Se inválido: "Convite expirado ou inválido"
-    Texto: "Peça ao familiar que te envie um novo convite."
+Fluxo de exclusão de conta:
+1. Verificar com get_solo_admin_families RPC:
+   const { data: soloAdminFamilies } = await supabase
+     .rpc('get_solo_admin_families', { p_user_id: user.id })
 
-  Se válido: mostrar nome da família + papel que receberá
+2. Se for único admin:
+   - NÃO mostrar modal de confirmação
+   - Mostrar aviso: "Você é o único administrador da família [Nome]. Promova outro membro como administrador antes de excluir sua conta."
+   - Botão: "Gerenciar família →"
 
-  TRÊS branches de ação (não apenas dois):
+3. Se não for único admin:
+   - Modal: "Excluir sua conta? Todos os seus dados serão removidos. Esta ação não pode ser desfeita."
+   - Campo de confirmação: digitar "EXCLUIR"
+   - Botão: "Excluir conta permanentemente"
 
-  1. Usuário está logado:
-     Botão "Aceitar convite" →
-     INSERT em family_members + UPDATE invitation status='accepted'
-     Redireciona para /dashboard
-
-  2. Usuário não tem conta:
-     Botão "Criar conta e aceitar" →
-     Redireciona para /register?invite=:token
-     Após registro: aceitar convite automaticamente
-
-  3. Usuário tem conta mas não está logado:
-     Botão "Entrar na minha conta e aceitar" →
-     Redireciona para /login?invite=:token
-     Após login: aceitar convite automaticamente
-
-  Detectar o estado correto verificando a sessão Supabase atual.
-
----
-
-Tela /membros/atividade:
-  Log de atividade da família
-  Query: access_logs WHERE family_id = ? ORDER BY created_at DESC
-  Paginação com "Carregar mais" (não scroll infinito)
-  Filtro por membro (select) e por tipo de ação (select)
-  Cada item: avatar, descrição legível da ação, data/hora relativa
-  (ex: "há 2 horas", "ontem às 15h")
-  Visível apenas para admins.
+## Regras técnicas
+- Ações de admin verificadas no servidor via RLS, não apenas no frontend
+- Convites expiram após 7 dias
+- Token do convite preservado via query param durante registro/login
+- Remoção de membro: UPDATE status = 'removed', não DELETE físico
 ```
 
 ---
 
-## PROMPT 10 — Perfil do Familiar (Página completa)
+## PROMPT 10 — Perfil do Familiar (Paciente)
 
 ```
-Implemente a página de perfil completo do familiar em
-/familia/:familyId/pacientes/:patientId
+Crie a tela de perfil completo do familiar cuidado no Amparo.
 
-Tabelas: patients, patient_conditions, patient_allergies, emergency_contacts
+## Tela principal (/paciente/{id})
 
-Layout: seções expansíveis (accordion) com header clicável.
-Cada seção tem botão "Editar" no header da seção que ativa
-edição inline — apenas os campos daquela seção ficam editáveis.
-Botão "Salvar" e "Cancelar" aparecem ao entrar em modo edição.
-Mostrar "Atualizado [data relativa]" em cinza no header de cada seção.
+Layout com tabs horizontais:
+Dados gerais | Alergias | Condições | Medicamentos | Contatos
 
----
+## Tab: Dados gerais
 
-SEÇÃO 1 — Identificação (aberta por padrão):
-  Foto circular (100px) — clicável para trocar:
-    · Mobile: "📷 Câmera" ou "🖼 Galeria"
-    · Desktop: file picker
-    Upload para bucket patient-photos
-  Nome completo (text)
-  Data de nascimento → idade calculada e exibida (ex: "80 anos")
-  Tipo sanguíneo (select com enum: A+, A-, B+, B-, AB+, AB-, O+, O-)
-  Altura em cm (number)
-  Peso em kg (number)
-  NÃO calcular nem exibir IMC — não é relevante para o contexto clínico
-  do app e pode ser constrangedor para o familiar que preenche.
-  Observações críticas (textarea)
+Exibe: Nome + data de nascimento + idade calculada + tipo sanguíneo + peso + altura
+SEM cálculo ou exibição de IMC em nenhum campo.
+Convênio + número da carteirinha + hospital de preferência + observações críticas.
+Botão "Editar" abre formulário completo.
 
----
+## Tab: Alergias
 
-SEÇÃO 2 — Convênio e hospital:
-  Nome do convênio (text)
-  Número da carteirinha (text)
-  Hospital de preferência (text)
-  Médico principal (text)
+Lista com badge de severidade: Crítica=vermelho | Alta=laranja | Média=amarelo | Baixa=cinza
+Botão "+" para adicionar.
+Formulário: nome da alergia + severidade + observações.
+Ação em alergia: botão ⋮ → Editar | Remover (soft delete).
 
----
+## Tab: Condições médicas
 
-SEÇÃO 3 — Alergias:
-  Lista de patient_allergies com badges de severidade:
-    Crítica=vermelho | Alta=laranja | Média=amarelo | Baixa=cinza
-  Botão "+ Adicionar alergia" → abre inline form:
-    Nome da alergia + select de severidade → INSERT
-  Tap em alergia existente: editar severidade ou remover (com confirmação)
+Lista com status: Ativa=verde | Inativa=cinza | Desconhecida=branco.
+Botão "+" para adicionar.
+Formulário: nome + descrição + data do diagnóstico + status.
 
----
+## Tab: Medicamentos
 
-SEÇÃO 4 — Condições médicas:
-  Lista de patient_conditions
-  Cada item: nome + status badge (ativa/inativa) + data de diagnóstico
-  Botão "+ Adicionar condição" → inline form: nome + status + diagnosed_at
-  Tap em condição: editar ou marcar como inativa
+Lista resumida dos medicamentos ativos. Link "Ver todos →" para /medicamentos.
 
----
+## Tab: Contatos de emergência
 
-SEÇÃO 5 — Contatos de emergência:
-  Lista ordenada por priority
-  Cada contato: nome, relação, telefone (botão "Ligar"), email
+Lista ordenada por priority.
+Cada contato: nome + parentesco + telefone (botão "Ligar") + badge de prioridade.
 
-  REORDENAÇÃO DE PRIORIDADE:
-  NÃO usar drag-and-drop (difícil no mobile web).
-  Usar botões ↑ e ↓ ao lado de cada contato para mover na lista.
-  UPDATE priority dos contatos afetados ao mover.
+Reordenar prioridade: botões ↑ ↓ em cada contato — NUNCA drag-and-drop.
+Ao tocar ↑: priority do contato sobe 1, priority do contato acima desce 1 (swap).
 
-  Botão "+ Adicionar contato" → inline form
+Botão "+" para adicionar. Formulário: nome (obrigatório) + parentesco + telefone + e-mail.
+Ação: botão ⋮ → Editar | Remover (soft delete).
 
----
+## Formulário de edição do perfil
 
-SEÇÃO 6 — Prévia de emergência (read-only, sempre fechada por padrão):
-  Card compacto mostrando exatamente o que aparecerá na tela pública
-  de emergência — útil para o usuário verificar o que está exposto.
-  Botão "Abrir tela de emergência" → abre modal da emergência
+Campos:
+- Foto (câmera/galeria no mobile, drag-drop no desktop)
+- Nome completo / Data de nascimento
+- Tipo sanguíneo: select validado (A+, A-, B+, B-, AB+, AB-, O+, O-, Não sei)
+- Peso (kg) / Altura (cm)
+- Sem campo de IMC — nunca calcular ou exibir
+- Convênio + número da carteirinha + hospital + observações críticas
 
----
-
-Todas as edições:
-  INSERT em access_logs com action='patient_update',
-  resource_type='patient', resource_id=patientId
+## Regras técnicas
+- Soft delete para patient_allergies e patient_conditions
+- Reordenação de contatos: swap de priority entre dois registros
+- Tipo sanguíneo validado pelo CHECK constraint — nunca enviar valor fora da lista
+- Foto salva em Storage: patients/{patient_id}/profile/{filename}
+- URL gerada via signed URL, nunca armazenada como file_url
 ```
 
 ---
 
-## PROMPT 11 — Polimentos finais, PWA e estados vazios
+## PROMPT 11 — Ajustes Finais, Performance e Polimento
 
 ```
-Aplique os seguintes polimentos no app Amparo:
+Aplique os ajustes finais de performance, acessibilidade e polimento no Amparo.
 
----
+## 1. Loading states globais
 
-1. ESTADOS VAZIOS:
-   Cada módulo sem dados deve ter:
-   - Ilustração SVG simples e acolhedora (inline, sem dependência externa)
-   - Texto encorajador em cinza-600
-   - Botão de ação primária
+Em TODA tela que faz query ao banco:
+- Skeleton loading enquanto carrega (nunca spinner isolado no meio da tela)
+- Skeleton replica o layout real dos cards (mesma altura, mesma estrutura)
+- Após carregamento: fade-in suave nos dados
+- Estado de erro: mensagem clara + botão "Tentar novamente"
 
-   Exemplos:
-   - Medicamentos: "Nenhum medicamento cadastrado ainda." + "Cadastrar primeiro"
-   - Agenda: "Nenhuma consulta agendada." + "Agendar consulta"
-   - Documentos: "Sua biblioteca está vazia. Suba o primeiro documento." + "Subir agora"
-   - Histórico: "Nenhum evento clínico registrado." + "Registrar primeiro evento"
+## 2. Cache na página de emergência
 
----
+Após primeiro carregamento bem-sucedido: salvar no localStorage:
+- Identificação (nome, foto, tipo sanguíneo) + Alergias + Medicamentos ativos
+Se offline: mostrar dados do cache com banner "⚠ Você está offline. Estas informações podem não estar atualizadas."
+Cache válido por 24 horas.
 
-2. FEEDBACK DE AÇÕES:
-   Instalar biblioteca sonner para toast notifications.
-   - Sucesso: verde, 3 segundos, ícone ✓
-   - Erro: vermelho, 5 segundos, botão "Tentar novamente"
-     O botão "Tentar novamente" deve re-executar a mesma mutation do React Query.
-     Passar o callback da action para o toast ao dispará-lo.
-   - Loading: spinner inline substituindo texto do botão durante requisição.
-     Nunca desabilitar botão sem feedback visual de loading.
+## 3. Acessibilidade mobile
 
----
+- Mínimo de 44px de área de toque em todos os botões e ícones
+- Fonte mínima de 16px em todos os inputs
+- Labels visíveis em todos os campos (nunca só placeholder)
+- Alto contraste: fundo branco + texto preto/cinza escuro
+- Bottom sheet com handle visual (barra cinza no topo)
+- Modais com botão X + fechar ao tocar fora
 
-3. CONFIRMAÇÕES DESTRUTIVAS:
-   Para: deletar, remover membro, encerrar medicamento, cancelar consulta:
-   - Modal com título descritivo: "Excluir [nome do item]?"
-   - Texto: "Esta ação não pode ser desfeita."
-   - Botão confirmar: vermelho, texto "Sim, excluir"
-   - Botão cancelar: secundário, texto "Voltar"
+## 4. Disclaimer obrigatório
 
----
+Adicionar em 3 locais:
+1. Footer da página pública de emergência
+2. Telas com IA ou resumo (P1)
+3. Tela de medicamentos (interações — P1)
 
-4. OFFLINE / ERRO DE REDE:
-   Detectar via navigator.onLine + evento 'offline'.
-   Quando offline: banner fixo no topo (amarelo, abaixo do header):
-   "Sem conexão — exibindo dados salvos. Alterações serão sincronizadas ao reconectar."
-   Dados já carregados permanecem visíveis via React Query cache.
-   Ao reconectar: dismiss do banner + refetch automático.
+Texto padrão:
+"O Amparo organiza informações e oferece apoio contextual. Ele não substitui médicos,
+farmacêuticos, serviços de emergência ou orientação profissional de saúde."
 
----
+## 5. Confirmação de exclusão de conta — único admin
 
-5. RESPONSIVIDADE — testar nos breakpoints:
-   - 375px (iPhone SE) — breakpoint crítico, tudo deve caber sem scroll horizontal
-   - 390px (iPhone 14)
-   - 768px (iPad) — sidebar aparece, bottom nav some
-   - 1280px (desktop)
+Usar a função RPC get_solo_admin_families (criada no Prompt 1) — uma única query:
 
----
+    const { data: soloAdminFamilies } = await supabase
+      .rpc('get_solo_admin_families', { p_user_id: user.id })
 
-6. ACESSIBILIDADE BÁSICA:
-   - Todos os botões de ícone: aria-label descritivo
-   - Contraste mínimo 4.5:1 em texto normal, 3:1 em texto grande
-   - Fontes: mínimo 16px para corpo, 14px para labels secundários
-   - Tap targets: mínimo 44×44px (usar min-h-11 min-w-11 no Tailwind)
-   - Inputs com htmlFor/id corretos para acessibilidade
+    if (soloAdminFamilies && soloAdminFamilies.length > 0) {
+      showSingleAdminWarning(soloAdminFamilies[0].family_id)
+      return
+    }
+    // Só então mostrar modal de confirmação de exclusão
 
----
+NÃO usar loop com múltiplas queries.
 
-7. PÁGINA DE PERFIL DO USUÁRIO (/perfil):
-   Acessível pelo avatar no header.
-   Campos:
-   - Nome completo (editável — UPDATE em profiles)
-   - Foto (upload — mesmo padrão mobile/desktop dos outros módulos)
-   - Email (read-only — vem do auth, não editável aqui)
-   - Telefone (editável — UPDATE em profiles)
+## 6. Tratamento de erros globais
 
-   Botão "Sair":
-     Modal de confirmação simples → signOut() → redireciona para /login
+- Erros de rede: toast "Sem conexão. Verifique sua internet."
+- Erros de autenticação: redirecionar para /login
+- Erros de permissão (RLS): toast "Você não tem permissão para esta ação."
+- Erros de upload: toast com nome do arquivo + opção de tentar novamente
+- Erros de validação: mensagem inline abaixo do campo, nunca modal
 
-   Botão "Excluir minha conta" (vermelho, ao final):
-     ANTES de mostrar confirmação: verificar se o usuário é o único
-     admin de alguma família.
-     Se for único admin:
-       Mostrar aviso bloqueante:
-       "Você é o único administrador da família '[nome]'.
-       Promova outro membro a admin antes de excluir sua conta."
-       Botão: "Gerenciar família" → /familia/:id/membros
-       NÃO mostrar opção de excluir enquanto for único admin.
-     Se não for único admin:
-       Dupla confirmação:
-       1ª: Modal "Tem certeza? Todos os seus dados serão removidos."
-       2ª: Pedir digitar email para confirmar → então executar exclusão.
+## 7. Otimizações de performance
 
----
+- Lazy loading de imagens
+- Paginação em listas longas (documentos, histórico): LIMIT/OFFSET ou cursor-based
+- Imagens de paciente: thumbnail 80x80 no card, versão full só ao abrir perfil
+- Prefetch das queries mais comuns ao fazer login
 
-8. PWA — Progressive Web App:
-   Criar public/manifest.json:
-   {
-     "name": "Amparo",
-     "short_name": "Amparo",
-     "description": "A central de saúde da sua família",
-     "start_url": "/",
-     "display": "standalone",
-     "background_color": "#ffffff",
-     "theme_color": "#2563eb",
-     "icons": [
-       { "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
-       { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png" },
-       { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png",
-         "purpose": "maskable" }
-     ]
-   }
+## 8. Validações client-side
 
-   Criar ícones placeholder em public/icons/ (192×192 e 512×512 PNG)
-   com fundo azul-600 e letra "A" branca centralizada.
+- Campos obrigatórios em vermelho se vazios
+- Datas: data de fim nunca antes de data de início
+- Tipo sanguíneo: apenas valores da lista
+- Arquivo: verificar tipo (JPEG, PNG, PDF) e tamanho (máximo 20MB) antes de subir
 
-   Adicionar no index.html:
-   <link rel="manifest" href="/manifest.json">
-   <meta name="theme-color" content="#2563eb">
-   <meta name="apple-mobile-web-app-capable" content="yes">
-   <meta name="apple-mobile-web-app-status-bar-style" content="default">
+## 9. Resultado esperado
 
-   META TAGS SEO no index.html:
-   <title>Amparo — A central de saúde da sua família</title>
-   <meta name="description" content="Organize remédios, exames, consultas
-   e histórico médico de quem você cuida. Compartilhe com a família.">
+Ao concluir todos os 11 prompts, o Amparo deve:
+- Ter banco com RLS ativo em todas as tabelas clínicas
+- Ter soft delete funcionando em patients, medications, appointments, clinical_events, documents
+- Ter upload correto (file_path, não file_url)
+- Ter busca de documentos server-side via search_vector
+- Ter página de emergência com cache e Edge Function para log
+- Ter fluxo de convite com 3 branches
+- Ter confirmação de realizado em 2 etapas
+- Ter reordenação de contatos via botões ↑↓
+- Não ter IMC em nenhuma tela
+- Não ter swipe-to-reveal em nenhuma interação
+- Ter FAB acima da bottom nav (bottom: 72px)
+- Ter disclaimer em todos os locais corretos
+- Ser funcional em celular com sinal fraco (pelo menos a emergência)
 ```
 
 ---
 
-## Ordem de execução recomendada
+## Sequência de execução
 
-| # | Prompt | O que entrega |
-|---|--------|---------------|
-| 1 | Fundação | Auth, layout, navegação correta |
-| 2 | Onboarding | Primeiro acesso com passos opcionais |
-| 3 | Dashboard | Home com seletor sticky e FAB posicionado |
-| 4 | Medicamentos | Cadastro, logs, histórico |
-| 5 | Agenda | Lista + calendário, fluxo de 2 passos |
-| 6 | Histórico | Timeline com filtros em bottom sheet |
-| 7 | Documentos | Upload mobile-first, busca server-side |
-| **8** | **Emergência** | **Módulo diferencial — validar RLS antes de publicar** |
-| 9 | Família | Convites com 3 branches, log de atividade |
-| 10 | Perfil do familiar | Seções editáveis, sem IMC, reordenação com ↑↓ |
-| 11 | Polimentos | Estados vazios, PWA, proteção de único admin |
-
-## Dicas para usar no Lovable
-
-- Execute **um prompt por vez** e valide o resultado antes de avançar
-- Use o chat do Lovable para ajustes pontuais antes de ir ao próximo prompt
-- Após os prompts 1–3, já é possível mostrar para usuários beta
-- No prompt 8, a Edge Function de log de acesso precisa ser criada
-  no painel do Supabase antes de testar a página pública de emergência
-- Antes de publicar o prompt 8, valide que a página /emergencia/:token
-  é acessível sem login mas não expõe dados de outros pacientes
+| # | Prompt | O que cria | Testar antes de avançar |
+|---|---|---|---|
+| 0 | Contexto permanente | Configuração do projeto | — |
+| 1 | Banco + Auth | Migration, RLS, triggers, estrutura | Verificar tabelas no Supabase |
+| 2 | Onboarding | 5 passos de cadastro | Criar conta e família completos |
+| 3 | Dashboard | Home com todos os blocos | Visualizar com dados do onboarding |
+| 4 | Medicamentos | Lista + formulário + ações | Adicionar e arquivar medicamento |
+| 5 | Agenda | Lista + formulário + 2 etapas | Criar e marcar consulta como realizada |
+| 6 | Histórico | Linha do tempo + filtros | Registrar evento e filtrar |
+| 7 | Documentos | Upload + busca + viewer | Subir foto e PDF, buscar |
+| 8 | Emergência | Página pública + Edge Function | Testar link público sem login |
+| 9 | Família | Convites + papéis + exclusão | Convidar membro pelo link |
+| 10 | Perfil do paciente | Dados + alergias + contatos | Editar e reordenar contatos |
+| 11 | Polimento | Cache, loading, acessibilidade | Testar offline na emergência |

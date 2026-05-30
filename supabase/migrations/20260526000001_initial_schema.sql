@@ -1,159 +1,178 @@
 -- =============================================================
 -- Amparo — Family Health Hub
--- Migration: initial schema
+-- Migration V2: schema completo com soft delete, RLS e funções auxiliares
+-- Versão: PRD V2
 -- =============================================================
 
 -- ---------------------------------------------------------------
--- Extensions
+-- EXTENSIONS
 -- ---------------------------------------------------------------
 create extension if not exists "pgcrypto";
 
 -- ---------------------------------------------------------------
--- ENUM types
+-- TRIGGER updated_at (reutilizado em todas as tabelas)
 -- ---------------------------------------------------------------
--- FIX: usar ENUMs em vez de text+CHECK para tipos fixos garante
--- integridade, autocompletar nas ferramentas e renaming controlado.
-
-create type family_member_role   as enum ('admin', 'editor', 'viewer', 'caregiver', 'doctor');
-create type family_member_status as enum ('invited', 'active', 'removed');
-create type blood_type_enum      as enum ('A+','A-','B+','B-','AB+','AB-','O+','O-','unknown');
-create type condition_status     as enum ('active', 'inactive', 'unknown');
-create type allergy_severity     as enum ('low', 'medium', 'high', 'critical');
-create type medication_status    as enum ('active', 'paused', 'ended');
-create type medication_log_status as enum ('taken', 'missed', 'skipped');
-create type appointment_type     as enum ('consultation', 'exam', 'return', 'procedure', 'therapy', 'vaccine', 'other');
-create type appointment_status   as enum ('scheduled', 'confirmed', 'done', 'cancelled', 'rescheduled');
-create type clinical_event_type  as enum (
-  'consultation', 'exam', 'hospitalization', 'surgery', 'symptom',
-  'fall_accident', 'medication_change', 'diagnosis', 'return',
-  'crisis', 'vaccine', 'family_note', 'other'
-);
-create type event_severity       as enum ('low', 'medium', 'high', 'critical');
-create type document_type        as enum (
-  'prescription', 'exam', 'report', 'medical_request',
-  'insurance_card', 'id_document', 'discharge', 'vaccine', 'other'
-);
-create type invitation_status    as enum ('pending', 'accepted', 'expired', 'cancelled');
+create or replace function set_updated_at()
+returns trigger as $$
+begin
+  new.updated_at = now();
+  return new;
+end;
+$$ language plpgsql;
 
 -- ---------------------------------------------------------------
--- profiles
--- FIX: tabela nova — auth.users não armazena nome, foto, telefone.
--- Necessária para exibir "quem fez alteração" nos logs.
+-- PROFILES
 -- ---------------------------------------------------------------
 create table profiles (
-  id          uuid primary key references auth.users(id) on delete cascade,
-  full_name   text,
-  phone       text,
-  avatar_url  text,
-  created_at  timestamptz not null default now(),
-  updated_at  timestamptz not null default now()
+  id               uuid primary key references auth.users(id) on delete cascade,
+  full_name        text,
+  phone            text,
+  photo_url        text,
+  onboarding_step  int  default 0,
+  -- 0=conta criada, 1=família criada, 2=paciente criado, 3=completo
+  created_at       timestamptz not null default now(),
+  updated_at       timestamptz not null default now()
 );
+create trigger profiles_updated_at before update on profiles
+  for each row execute function set_updated_at();
+alter table profiles enable row level security;
+create policy "users can read own profile"   on profiles for select using (id = auth.uid());
+create policy "users can insert own profile" on profiles for insert with check (id = auth.uid());
+create policy "users can update own profile" on profiles for update using (id = auth.uid());
+
+-- Trigger: cria profile automaticamente ao criar usuário no Auth
+create or replace function handle_new_user()
+returns trigger as $$
+begin
+  insert into profiles (id, full_name)
+  values (new.id, new.raw_user_meta_data->>'full_name');
+  return new;
+end;
+$$ language plpgsql security definer;
+
+create trigger on_auth_user_created
+  after insert on auth.users
+  for each row execute function handle_new_user();
 
 -- ---------------------------------------------------------------
--- families
+-- FAMILIES
 -- ---------------------------------------------------------------
 create table families (
   id          uuid primary key default gen_random_uuid(),
   name        text not null,
-  created_by  uuid not null references auth.users(id) on delete restrict,
+  created_by  uuid references auth.users(id) on delete set null,
   created_at  timestamptz not null default now(),
   updated_at  timestamptz not null default now()
 );
+create trigger families_updated_at before update on families
+  for each row execute function set_updated_at();
+alter table families enable row level security;
 
 -- ---------------------------------------------------------------
--- family_members
--- FIX: adicionado unique(family_id, user_id), updated_at, invited_by
+-- FAMILY_MEMBERS
 -- ---------------------------------------------------------------
 create table family_members (
   id          uuid primary key default gen_random_uuid(),
   family_id   uuid not null references families(id) on delete cascade,
   user_id     uuid not null references auth.users(id) on delete cascade,
-  role        family_member_role not null default 'viewer',
-  status      family_member_status not null default 'invited',
+  role        text not null check (role in ('admin', 'editor', 'viewer', 'caregiver')),
+  status      text not null check (status in ('invited', 'active', 'removed')),
   invited_by  uuid references auth.users(id) on delete set null,
   created_at  timestamptz not null default now(),
   updated_at  timestamptz not null default now(),
-
   unique (family_id, user_id)
 );
+create index idx_family_members_family_id on family_members(family_id);
+create index idx_family_members_user_id   on family_members(user_id);
+create trigger family_members_updated_at before update on family_members
+  for each row execute function set_updated_at();
+alter table family_members enable row level security;
 
 -- ---------------------------------------------------------------
--- invitations
--- FIX: tabela nova — rastreia convites por email antes do usuário
--- criar conta, necessário para o fluxo de onboarding.
+-- INVITATIONS
 -- ---------------------------------------------------------------
 create table invitations (
   id          uuid primary key default gen_random_uuid(),
   family_id   uuid not null references families(id) on delete cascade,
-  email       text not null,
-  role        family_member_role not null default 'viewer',
-  token       text not null unique default encode(gen_random_bytes(32), 'hex'),
-  status      invitation_status not null default 'pending',
-  invited_by  uuid not null references auth.users(id) on delete cascade,
-  expires_at  timestamptz not null default (now() + interval '7 days'),
-  accepted_at timestamptz,
+  token       text unique not null default encode(gen_random_bytes(32), 'hex'),
+  email       text,
+  role        text not null check (role in ('admin', 'editor', 'viewer', 'caregiver')),
+  invited_by  uuid references auth.users(id) on delete set null,
+  status      text not null check (status in ('pending', 'accepted', 'expired')),
+  expires_at  timestamptz not null,
   created_at  timestamptz not null default now()
 );
+create index idx_invitations_token     on invitations(token);
+create index idx_invitations_family_id on invitations(family_id);
+alter table invitations enable row level security;
 
 -- ---------------------------------------------------------------
--- patients
--- FIX: blood_type com enum, adicionado created_by, primary_doctor
+-- PATIENTS
 -- ---------------------------------------------------------------
 create table patients (
   id                      uuid primary key default gen_random_uuid(),
-  family_id               uuid not null references families(id) on delete cascade,
-  created_by              uuid not null references auth.users(id) on delete restrict,
+  family_id               uuid not null references families(id) on delete restrict,
   name                    text not null,
-  -- FIX: armazenar path do Storage, não URL direta (RLS + signed URLs)
-  photo_path              text,
+  photo_url               text,
   birth_date              date,
-  -- FIX: enum em vez de text livre
-  blood_type              blood_type_enum,
-  height_cm               numeric(5,2),
-  weight_kg               numeric(5,2),
+  blood_type              text check (blood_type in ('A+','A-','B+','B-','AB+','AB-','O+','O-','unknown')),
+  height                  numeric,
+  weight                  numeric,
+  -- sem campo de IMC: nunca calcular ou exibir automaticamente
   health_insurance_name   text,
   health_insurance_number text,
   preferred_hospital      text,
-  primary_doctor_name     text,
   notes                   text,
+  created_by              uuid references auth.users(id) on delete set null,
+  deleted_at              timestamptz,
+  deleted_by              uuid references auth.users(id),
   created_at              timestamptz not null default now(),
   updated_at              timestamptz not null default now()
 );
+create index idx_patients_family_id  on patients(family_id);
+create index idx_patients_deleted_at on patients(deleted_at);
+create trigger patients_updated_at before update on patients
+  for each row execute function set_updated_at();
+alter table patients enable row level security;
 
 -- ---------------------------------------------------------------
--- patient_conditions
--- FIX: adicionado on delete cascade, updated_at, created_by, diagnosed_at
+-- PATIENT_CONDITIONS
 -- ---------------------------------------------------------------
 create table patient_conditions (
-  id            uuid primary key default gen_random_uuid(),
-  patient_id    uuid not null references patients(id) on delete cascade,
-  created_by    uuid not null references auth.users(id) on delete restrict,
-  name          text not null,
-  description   text,
-  status        condition_status not null default 'active',
-  diagnosed_at  date,
-  created_at    timestamptz not null default now(),
-  updated_at    timestamptz not null default now()
+  id           uuid primary key default gen_random_uuid(),
+  patient_id   uuid not null references patients(id) on delete cascade,
+  name         text not null,
+  description  text,
+  diagnosed_at date,
+  status       text check (status in ('active', 'inactive', 'unknown')),
+  deleted_at   timestamptz,
+  deleted_by   uuid references auth.users(id),
+  created_at   timestamptz not null default now(),
+  updated_at   timestamptz not null default now()
 );
+create index idx_patient_conditions_patient_id on patient_conditions(patient_id);
+create index idx_patient_conditions_deleted_at on patient_conditions(deleted_at);
+alter table patient_conditions enable row level security;
 
 -- ---------------------------------------------------------------
--- patient_allergies
--- FIX: adicionado on delete cascade, updated_at, created_by
+-- PATIENT_ALLERGIES
 -- ---------------------------------------------------------------
 create table patient_allergies (
-  id          uuid primary key default gen_random_uuid(),
-  patient_id  uuid not null references patients(id) on delete cascade,
-  created_by  uuid not null references auth.users(id) on delete restrict,
-  allergy     text not null,
-  severity    allergy_severity not null default 'medium',
-  notes       text,
-  created_at  timestamptz not null default now(),
-  updated_at  timestamptz not null default now()
+  id         uuid primary key default gen_random_uuid(),
+  patient_id uuid not null references patients(id) on delete cascade,
+  allergy    text not null,
+  severity   text check (severity in ('low', 'medium', 'high', 'critical')),
+  notes      text,
+  deleted_at timestamptz,
+  deleted_by uuid references auth.users(id),
+  created_at timestamptz not null default now()
 );
+create index idx_patient_allergies_patient_id on patient_allergies(patient_id);
+create index idx_patient_allergies_deleted_at on patient_allergies(deleted_at);
+alter table patient_allergies enable row level security;
 
 -- ---------------------------------------------------------------
--- emergency_contacts
--- FIX: adicionado on delete cascade, updated_at, check phone/email
+-- EMERGENCY_CONTACTS
 -- ---------------------------------------------------------------
 create table emergency_contacts (
   id           uuid primary key default gen_random_uuid(),
@@ -162,459 +181,482 @@ create table emergency_contacts (
   relationship text,
   phone        text,
   email        text,
-  -- FIX: pelo menos um contato obrigatório
-  priority     int not null default 1,
-  notes        text,
-  created_at   timestamptz not null default now(),
-  updated_at   timestamptz not null default now(),
-
-  constraint chk_contact_method check (phone is not null or email is not null)
+  priority     int  default 1,
+  -- reordenação via botões ↑↓, nunca drag-and-drop
+  deleted_at   timestamptz,
+  deleted_by   uuid references auth.users(id),
+  created_at   timestamptz not null default now()
 );
+create index idx_emergency_contacts_patient_id on emergency_contacts(patient_id);
+create index idx_emergency_contacts_deleted_at on emergency_contacts(deleted_at);
+alter table emergency_contacts enable row level security;
 
 -- ---------------------------------------------------------------
--- medications
--- FIX: adicionado on delete cascade, created_by, generic_name
+-- MEDICATIONS
 -- ---------------------------------------------------------------
 create table medications (
-  id              uuid primary key default gen_random_uuid(),
-  patient_id      uuid not null references patients(id) on delete cascade,
-  created_by      uuid not null references auth.users(id) on delete restrict,
-  name            text not null,
-  generic_name    text,
-  dosage          text,
-  frequency       text,
-  -- jsonb: [{"time": "08:00"}, {"time": "20:00"}]
-  schedule        jsonb,
-  start_date      date,
-  end_date        date,
-  prescribed_by   text,
-  status          medication_status not null default 'active',
-  notes           text,
-  -- FIX: path do Storage
-  photo_path      text,
-  created_at      timestamptz not null default now(),
-  updated_at      timestamptz not null default now()
+  id           uuid primary key default gen_random_uuid(),
+  patient_id   uuid not null references patients(id) on delete cascade,
+  name         text not null,
+  generic_name text,
+  dosage       text,
+  frequency    text,
+  schedule     jsonb,
+  -- formato obrigatório: { "times": ["08:00", "14:00"] } — nunca usar outro formato ou chave
+  start_date   date,
+  end_date     date,
+  prescribed_by text,
+  status       text not null check (status in ('active', 'paused', 'ended')),
+  notes        text,
+  file_path    text,
+  -- path interno Supabase Storage; URL assinada gerada na aplicação, nunca armazenar file_url
+  deleted_at   timestamptz,
+  deleted_by   uuid references auth.users(id),
+  created_at   timestamptz not null default now(),
+  updated_at   timestamptz not null default now()
 );
+create index idx_medications_patient_id on medications(patient_id);
+create index idx_medications_status     on medications(status);
+create index idx_medications_deleted_at on medications(deleted_at);
+create trigger medications_updated_at before update on medications
+  for each row execute function set_updated_at();
+alter table medications enable row level security;
 
 -- ---------------------------------------------------------------
--- medication_change_history
--- FIX: tabela nova — PRD exige preservar histórico de mudanças de dose
--- ---------------------------------------------------------------
-create table medication_change_history (
-  id             uuid primary key default gen_random_uuid(),
-  medication_id  uuid not null references medications(id) on delete cascade,
-  changed_by     uuid not null references auth.users(id) on delete restrict,
-  field_changed  text not null,
-  old_value      text,
-  new_value      text,
-  change_reason  text,
-  created_at     timestamptz not null default now()
-);
-
--- ---------------------------------------------------------------
--- medication_logs
--- FIX: removido patient_id redundante, adicionado scheduled_for
+-- MEDICATION_LOGS (P1 — tabela criada agora, funcionalidade em P1)
 -- ---------------------------------------------------------------
 create table medication_logs (
-  id             uuid primary key default gen_random_uuid(),
-  medication_id  uuid not null references medications(id) on delete cascade,
-  -- FIX: quando deveria ter sido tomado (base para calcular "missed")
-  scheduled_for  timestamptz,
-  taken_at       timestamptz,
-  status         medication_log_status not null,
-  logged_by      uuid references auth.users(id) on delete set null,
-  notes          text,
-  created_at     timestamptz not null default now()
+  id            uuid primary key default gen_random_uuid(),
+  medication_id uuid not null references medications(id) on delete cascade,
+  -- sem patient_id: obtido via medications.patient_id
+  taken_at      timestamptz,
+  scheduled_for timestamptz,
+  -- quando deveria ter sido tomado (base para calcular 'missed')
+  status        text check (status in ('taken', 'missed', 'skipped')),
+  logged_by     uuid references auth.users(id) on delete set null,
+  notes         text,
+  created_at    timestamptz not null default now()
 );
+create index idx_medication_logs_medication_id on medication_logs(medication_id);
+create index idx_medication_logs_scheduled_for on medication_logs(scheduled_for);
+alter table medication_logs enable row level security;
 
 -- ---------------------------------------------------------------
--- appointments
--- FIX: adicionado created_by, address, map_url, parent_appointment_id
+-- APPOINTMENTS
 -- ---------------------------------------------------------------
 create table appointments (
-  id                   uuid primary key default gen_random_uuid(),
-  patient_id           uuid not null references patients(id) on delete cascade,
-  created_by           uuid not null references auth.users(id) on delete restrict,
-  -- FIX: permite criar retorno vinculado à consulta origem
+  id                    uuid primary key default gen_random_uuid(),
+  patient_id            uuid not null references patients(id) on delete cascade,
   parent_appointment_id uuid references appointments(id) on delete set null,
-  type                 appointment_type not null,
-  title                text not null,
-  scheduled_at         timestamptz not null,
-  -- FIX: separado nome do local de endereço e link de mapa
-  location_name        text,
-  address              text,
-  map_url              text,
-  doctor_name          text,
-  specialty            text,
-  responsible_user_id  uuid references auth.users(id) on delete set null,
-  status               appointment_status not null default 'scheduled',
-  notes                text,
-  created_at           timestamptz not null default now(),
-  updated_at           timestamptz not null default now()
+  -- retorno vinculado à consulta original; profundidade máxima: 1 nível
+  type                  text not null check (type in (
+    'consultation', 'exam', 'return', 'procedure', 'therapy', 'vaccine', 'other'
+  )),
+  title                 text not null,
+  scheduled_at          timestamptz not null,
+  location              text,
+  address               text,
+  map_url               text,
+  doctor_name           text,
+  specialty             text,
+  responsible_user_id   uuid references auth.users(id) on delete set null,
+  status                text not null check (status in (
+    'scheduled', 'confirmed', 'done', 'cancelled', 'rescheduled'
+  )),
+  notes                 text,
+  deleted_at            timestamptz,
+  deleted_by            uuid references auth.users(id),
+  created_at            timestamptz not null default now(),
+  updated_at            timestamptz not null default now()
 );
+create index idx_appointments_patient_id   on appointments(patient_id);
+create index idx_appointments_scheduled_at on appointments(scheduled_at);
+create index idx_appointments_status       on appointments(status);
+create index idx_appointments_deleted_at   on appointments(deleted_at);
+create trigger appointments_updated_at before update on appointments
+  for each row execute function set_updated_at();
+alter table appointments enable row level security;
 
 -- ---------------------------------------------------------------
--- clinical_events
--- FIX: type com enum, adicionado on delete cascade, doctor_name,
--- tags, appointment_id
+-- CLINICAL_EVENTS
 -- ---------------------------------------------------------------
 create table clinical_events (
-  id              uuid primary key default gen_random_uuid(),
-  patient_id      uuid not null references patients(id) on delete cascade,
-  appointment_id  uuid references appointments(id) on delete set null,
-  created_by      uuid not null references auth.users(id) on delete restrict,
-  event_date      date not null,
-  -- FIX: enum com tipos definidos no PRD
-  type            clinical_event_type not null,
-  title           text not null,
-  description     text,
-  severity        event_severity,
-  doctor_name     text,
-  tags            text[],
-  created_at      timestamptz not null default now(),
-  updated_at      timestamptz not null default now()
+  id             uuid primary key default gen_random_uuid(),
+  patient_id     uuid not null references patients(id) on delete cascade,
+  appointment_id uuid references appointments(id) on delete set null,
+  -- preenchido quando evento gerado automaticamente ao marcar consulta como realizada;
+  -- evita duplicatas em clique duplo
+  event_date     date not null,
+  type           text not null check (type in (
+    'consultation', 'exam', 'hospitalization', 'surgery', 'symptom',
+    'fall_accident', 'medication_change', 'diagnosis', 'return',
+    'crisis', 'vaccine', 'family_note'
+  )),
+  title          text not null,
+  description    text,
+  severity       text check (severity in ('low', 'medium', 'high', 'critical')),
+  created_by     uuid references auth.users(id) on delete set null,
+  deleted_at     timestamptz,
+  deleted_by     uuid references auth.users(id),
+  created_at     timestamptz not null default now(),
+  updated_at     timestamptz not null default now()
 );
+create index idx_clinical_events_patient_id   on clinical_events(patient_id);
+create index idx_clinical_events_event_date   on clinical_events(event_date);
+create index idx_clinical_events_deleted_at   on clinical_events(deleted_at);
+create trigger clinical_events_updated_at before update on clinical_events
+  for each row execute function set_updated_at();
+alter table clinical_events enable row level security;
 
 -- ---------------------------------------------------------------
--- documents
--- FIX: file_path em vez de file_url, adicionados file_size,
--- expiry_date, clinical_event_id, appointment_id
+-- DOCUMENTS
 -- ---------------------------------------------------------------
 create table documents (
   id                uuid primary key default gen_random_uuid(),
   patient_id        uuid not null references patients(id) on delete cascade,
-  uploaded_by       uuid not null references auth.users(id) on delete restrict,
-  clinical_event_id uuid references clinical_events(id) on delete set null,
-  appointment_id    uuid references appointments(id) on delete set null,
+  uploaded_by       uuid references auth.users(id) on delete set null,
   title             text not null,
-  type              document_type not null,
-  -- FIX: path interno do Supabase Storage (gera signed URL na app)
+  type              text not null check (type in (
+    'prescription', 'exam', 'report', 'medical_request', 'insurance_card',
+    'id_document', 'discharge', 'vaccine', 'medication_photo', 'other'
+  )),
   file_path         text not null,
+  -- path interno Supabase Storage; URL assinada gerada na aplicação
   file_mime_type    text,
-  -- FIX: controle de storage para billing/quotas
   file_size_bytes   bigint,
   document_date     date,
-  -- FIX: PRD menciona "validade (quando aplicável)"
   expiry_date       date,
   institution       text,
   doctor_name       text,
+  clinical_event_id uuid references clinical_events(id) on delete set null,
   tags              text[],
-  ocr_text          text,
-  ai_summary        text,
+  ocr_text          text,    -- P1: preenchido por OCR automático
+  ai_summary        text,    -- P1: resumo gerado por IA
+  search_vector     tsvector generated always as (
+    to_tsvector('portuguese',
+      coalesce(title,'')        || ' ' ||
+      coalesce(doctor_name,'')  || ' ' ||
+      coalesce(institution,'')  || ' ' ||
+      coalesce(ocr_text,'')
+    )
+  ) stored,
+  -- coluna gerada; usar search_vector nas queries, nunca recalcular tsvector inline
+  deleted_at        timestamptz,
+  deleted_by        uuid references auth.users(id),
   created_at        timestamptz not null default now(),
   updated_at        timestamptz not null default now()
 );
+create index idx_documents_patient_id on documents(patient_id);
+create index idx_documents_type       on documents(type);
+create index idx_documents_deleted_at on documents(deleted_at);
+create index idx_documents_fts        on documents using gin(search_vector);
+-- índice GIN na coluna gerada — usar em todas as buscas de documentos
+
+create trigger documents_updated_at before update on documents
+  for each row execute function set_updated_at();
+alter table documents enable row level security;
 
 -- ---------------------------------------------------------------
--- emergency_links
--- FIX: adicionado on delete cascade, access_count, last_accessed_at
+-- EMERGENCY_LINKS
 -- ---------------------------------------------------------------
 create table emergency_links (
-  id               uuid primary key default gen_random_uuid(),
-  patient_id       uuid not null references patients(id) on delete cascade,
-  created_by       uuid not null references auth.users(id) on delete restrict,
-  -- FIX: token criptograficamente seguro por padrão
-  token            text not null unique default encode(gen_random_bytes(32), 'hex'),
-  expires_at       timestamptz,
-  is_active        boolean not null default true,
-  access_count     int not null default 0,
-  last_accessed_at timestamptz,
-  created_at       timestamptz not null default now(),
-  updated_at       timestamptz not null default now()
+  id           uuid primary key default gen_random_uuid(),
+  patient_id   uuid not null references patients(id) on delete cascade,
+  token        text unique not null default encode(gen_random_bytes(32), 'hex'),
+  expires_at   timestamptz,
+  is_active    boolean not null default true,
+  access_count int     not null default 0,
+  -- access_count atualizado APENAS via Edge Function com service_role
+  created_by   uuid references auth.users(id) on delete set null,
+  created_at   timestamptz not null default now()
 );
+create index idx_emergency_links_token      on emergency_links(token);
+create index idx_emergency_links_patient_id on emergency_links(patient_id);
+alter table emergency_links enable row level security;
 
 -- ---------------------------------------------------------------
--- access_logs
--- FIX: user_id referencia auth.users (nullable para acesso anônimo
--- via link de emergência), adicionado user_agent, emergency_link_id
+-- ACCESS_LOGS
 -- ---------------------------------------------------------------
 create table access_logs (
-  id                 uuid primary key default gen_random_uuid(),
-  family_id          uuid references families(id) on delete set null,
-  patient_id         uuid references patients(id) on delete set null,
-  -- nullable: acesso anônimo via link de emergência
-  user_id            uuid references auth.users(id) on delete set null,
-  -- FIX: rastrear qual link de emergência foi usado
-  emergency_link_id  uuid references emergency_links(id) on delete set null,
-  action             text not null,
-  resource_type      text,
-  resource_id        uuid,
-  ip_address         text,
-  -- FIX: essencial para auditoria de segurança
-  user_agent         text,
-  created_at         timestamptz not null default now()
+  id                uuid primary key default gen_random_uuid(),
+  family_id         uuid references families(id) on delete set null,
+  patient_id        uuid references patients(id) on delete set null,
+  user_id           uuid references auth.users(id) on delete set null,
+  -- nullable: acessos anônimos via link de emergência
+  emergency_link_id uuid references emergency_links(id) on delete set null,
+  action            text not null,
+  resource_type     text,
+  resource_id       uuid,
+  ip_address        text,
+  -- dado pessoal LGPD: reter por no máximo 90 dias
+  user_agent        text,
+  created_at        timestamptz not null default now()
 );
+create index idx_access_logs_patient_id on access_logs(patient_id);
+create index idx_access_logs_family_id  on access_logs(family_id);
+create index idx_access_logs_created_at on access_logs(created_at);
+-- índice em created_at obrigatório para purge LGPD:
+-- delete from access_logs where created_at < now() - interval '90 days'
 
--- ---------------------------------------------------------------
--- ÍNDICES
--- FIX: todas as FKs mais usadas precisam de índice
--- ---------------------------------------------------------------
-create index idx_family_members_family_id   on family_members(family_id);
-create index idx_family_members_user_id     on family_members(user_id);
-create index idx_invitations_family_id      on invitations(family_id);
-create index idx_invitations_token          on invitations(token);
-create index idx_patients_family_id         on patients(family_id);
-create index idx_patient_conditions_patient on patient_conditions(patient_id);
-create index idx_patient_allergies_patient  on patient_allergies(patient_id);
-create index idx_emergency_contacts_patient on emergency_contacts(patient_id);
-create index idx_medications_patient_id     on medications(patient_id);
-create index idx_medications_status         on medications(status);
-create index idx_medication_logs_medication on medication_logs(medication_id);
-create index idx_medication_logs_scheduled  on medication_logs(scheduled_for);
-create index idx_appointments_patient_id    on appointments(patient_id);
-create index idx_appointments_scheduled_at  on appointments(scheduled_at);
-create index idx_clinical_events_patient    on clinical_events(patient_id);
-create index idx_clinical_events_date       on clinical_events(event_date);
-create index idx_documents_patient_id       on documents(patient_id);
-create index idx_documents_type             on documents(type);
-create index idx_emergency_links_token      on emergency_links(token);
-create index idx_emergency_links_patient    on emergency_links(patient_id);
-create index idx_access_logs_patient        on access_logs(patient_id);
-create index idx_access_logs_family         on access_logs(family_id);
-create index idx_access_logs_user           on access_logs(user_id);
-create index idx_access_logs_created        on access_logs(created_at desc);
+alter table access_logs enable row level security;
 
--- ---------------------------------------------------------------
--- ROW LEVEL SECURITY
--- FIX: sem RLS qualquer usuário autenticado lê dados de outras famílias
--- ---------------------------------------------------------------
-alter table profiles                  enable row level security;
-alter table families                  enable row level security;
-alter table family_members            enable row level security;
-alter table invitations               enable row level security;
-alter table patients                  enable row level security;
-alter table patient_conditions        enable row level security;
-alter table patient_allergies         enable row level security;
-alter table emergency_contacts        enable row level security;
-alter table medications               enable row level security;
-alter table medication_change_history enable row level security;
-alter table medication_logs           enable row level security;
-alter table appointments              enable row level security;
-alter table clinical_events           enable row level security;
-alter table documents                 enable row level security;
-alter table emergency_links           enable row level security;
-alter table access_logs               enable row level security;
+-- =============================================================
+-- FUNÇÕES AUXILIARES DE RLS
+-- =============================================================
 
--- Helper: retorna os family_ids aos quais o usuário corrente pertence (ativo)
-create or replace function auth.user_family_ids()
-returns setof uuid
+-- Verifica se o usuário corrente é membro ativo da família
+create or replace function is_family_member(fid uuid)
+returns boolean
 language sql
-stable
 security definer
+stable
 as $$
-  select family_id
-  from family_members
-  where user_id = auth.uid()
-    and status = 'active'
+  select exists (
+    select 1 from family_members
+    where family_id = fid
+      and user_id   = auth.uid()
+      and status    = 'active'
+  );
 $$;
 
--- Helper: retorna os patient_ids acessíveis ao usuário corrente
-create or replace function auth.user_patient_ids()
-returns setof uuid
+-- Verifica se o usuário corrente tem um dos papéis especificados na família
+create or replace function has_family_role(fid uuid, roles text[])
+returns boolean
 language sql
-stable
 security definer
+stable
 as $$
-  select id from patients
-  where family_id in (select auth.user_family_ids())
+  select exists (
+    select 1 from family_members
+    where family_id = fid
+      and user_id   = auth.uid()
+      and status    = 'active'
+      and role      = any(roles)
+  );
 $$;
 
--- profiles: cada usuário lê e edita apenas o próprio perfil
-create policy "profiles_select_own" on profiles for select using (id = auth.uid());
-create policy "profiles_insert_own" on profiles for insert with check (id = auth.uid());
-create policy "profiles_update_own" on profiles for update using (id = auth.uid());
-
--- families: membros ativos veem a família; apenas admin edita
-create policy "families_select_member" on families
-  for select using (id in (select auth.user_family_ids()));
-create policy "families_insert_own" on families
-  for insert with check (created_by = auth.uid());
-create policy "families_update_admin" on families
-  for update using (
-    id in (
-      select family_id from family_members
-      where user_id = auth.uid() and role = 'admin' and status = 'active'
+-- Retorna famílias onde o usuário é o ÚNICO admin (para bloquear exclusão de conta)
+create or replace function get_solo_admin_families(p_user_id uuid)
+returns table(family_id uuid)
+language sql
+security definer
+stable
+as $$
+  select fm.family_id
+  from family_members fm
+  where fm.user_id = p_user_id
+    and fm.role    = 'admin'
+    and fm.status  = 'active'
+    and fm.family_id in (
+      select family_id
+      from family_members
+      where role   = 'admin'
+        and status = 'active'
+      group by family_id
+      having count(*) = 1
     )
-  );
-
--- family_members: membros ativos veem os outros membros da família
-create policy "family_members_select" on family_members
-  for select using (family_id in (select auth.user_family_ids()));
-create policy "family_members_insert_admin" on family_members
-  for insert with check (
-    family_id in (
-      select family_id from family_members
-      where user_id = auth.uid() and role = 'admin' and status = 'active'
-    )
-  );
-create policy "family_members_update_admin" on family_members
-  for update using (
-    family_id in (
-      select family_id from family_members
-      where user_id = auth.uid() and role = 'admin' and status = 'active'
-    )
-  );
-
--- patients e todas as tabelas dependentes: acesso via família
-create policy "patients_select" on patients
-  for select using (family_id in (select auth.user_family_ids()));
-create policy "patients_insert" on patients
-  for insert with check (family_id in (select auth.user_family_ids()));
-create policy "patients_update" on patients
-  for update using (family_id in (select auth.user_family_ids()));
-
--- Macro para tabelas dependentes de patient_id
-create policy "patient_conditions_select" on patient_conditions
-  for select using (patient_id in (select auth.user_patient_ids()));
-create policy "patient_conditions_insert" on patient_conditions
-  for insert with check (patient_id in (select auth.user_patient_ids()));
-create policy "patient_conditions_update" on patient_conditions
-  for update using (patient_id in (select auth.user_patient_ids()));
-
-create policy "patient_allergies_select" on patient_allergies
-  for select using (patient_id in (select auth.user_patient_ids()));
-create policy "patient_allergies_insert" on patient_allergies
-  for insert with check (patient_id in (select auth.user_patient_ids()));
-create policy "patient_allergies_update" on patient_allergies
-  for update using (patient_id in (select auth.user_patient_ids()));
-
-create policy "emergency_contacts_select" on emergency_contacts
-  for select using (patient_id in (select auth.user_patient_ids()));
-create policy "emergency_contacts_insert" on emergency_contacts
-  for insert with check (patient_id in (select auth.user_patient_ids()));
-create policy "emergency_contacts_update" on emergency_contacts
-  for update using (patient_id in (select auth.user_patient_ids()));
-
-create policy "medications_select" on medications
-  for select using (patient_id in (select auth.user_patient_ids()));
-create policy "medications_insert" on medications
-  for insert with check (patient_id in (select auth.user_patient_ids()));
-create policy "medications_update" on medications
-  for update using (patient_id in (select auth.user_patient_ids()));
-
-create policy "medication_logs_select" on medication_logs
-  for select using (
-    medication_id in (
-      select id from medications where patient_id in (select auth.user_patient_ids())
-    )
-  );
-create policy "medication_logs_insert" on medication_logs
-  for insert with check (
-    medication_id in (
-      select id from medications where patient_id in (select auth.user_patient_ids())
-    )
-  );
-
-create policy "medication_change_history_select" on medication_change_history
-  for select using (
-    medication_id in (
-      select id from medications where patient_id in (select auth.user_patient_ids())
-    )
-  );
-create policy "medication_change_history_insert" on medication_change_history
-  for insert with check (
-    medication_id in (
-      select id from medications where patient_id in (select auth.user_patient_ids())
-    )
-  );
-
-create policy "appointments_select" on appointments
-  for select using (patient_id in (select auth.user_patient_ids()));
-create policy "appointments_insert" on appointments
-  for insert with check (patient_id in (select auth.user_patient_ids()));
-create policy "appointments_update" on appointments
-  for update using (patient_id in (select auth.user_patient_ids()));
-
-create policy "clinical_events_select" on clinical_events
-  for select using (patient_id in (select auth.user_patient_ids()));
-create policy "clinical_events_insert" on clinical_events
-  for insert with check (patient_id in (select auth.user_patient_ids()));
-create policy "clinical_events_update" on clinical_events
-  for update using (patient_id in (select auth.user_patient_ids()));
-
-create policy "documents_select" on documents
-  for select using (patient_id in (select auth.user_patient_ids()));
-create policy "documents_insert" on documents
-  for insert with check (patient_id in (select auth.user_patient_ids()));
-create policy "documents_update" on documents
-  for update using (patient_id in (select auth.user_patient_ids()));
-
--- emergency_links: membros da família gerenciam; token público para leitura anônima
-create policy "emergency_links_select_member" on emergency_links
-  for select using (patient_id in (select auth.user_patient_ids()));
-create policy "emergency_links_select_public" on emergency_links
-  for select using (is_active = true and (expires_at is null or expires_at > now()));
-create policy "emergency_links_insert" on emergency_links
-  for insert with check (patient_id in (select auth.user_patient_ids()));
-create policy "emergency_links_update" on emergency_links
-  for update using (patient_id in (select auth.user_patient_ids()));
-
--- access_logs: somente insert (auditoria imutável); admins da família leem
-create policy "access_logs_insert" on access_logs
-  for insert with check (true);
-create policy "access_logs_select_admin" on access_logs
-  for select using (
-    family_id in (
-      select family_id from family_members
-      where user_id = auth.uid() and role = 'admin' and status = 'active'
-    )
-  );
-
--- ---------------------------------------------------------------
--- TRIGGERS: updated_at automático
--- ---------------------------------------------------------------
-create or replace function set_updated_at()
-returns trigger language plpgsql as $$
-begin
-  new.updated_at = now();
-  return new;
-end;
 $$;
 
-create trigger trg_profiles_updated_at
-  before update on profiles
-  for each row execute function set_updated_at();
+-- =============================================================
+-- POLÍTICAS RLS
+-- =============================================================
 
-create trigger trg_families_updated_at
-  before update on families
-  for each row execute function set_updated_at();
+-- ── FAMILIES ──────────────────────────────────────────────────
+create policy "members can read families" on families
+  for select using (is_family_member(id));
+create policy "authenticated can insert families" on families
+  for insert with check (auth.uid() is not null);
+create policy "admins can update families" on families
+  for update using (has_family_role(id, array['admin']));
 
-create trigger trg_family_members_updated_at
-  before update on family_members
-  for each row execute function set_updated_at();
+-- ── FAMILY_MEMBERS ────────────────────────────────────────────
+create policy "members can read family_members" on family_members
+  for select using (is_family_member(family_id));
+create policy "admins can manage family_members" on family_members
+  for all using (has_family_role(family_id, array['admin']));
 
-create trigger trg_patients_updated_at
-  before update on patients
-  for each row execute function set_updated_at();
+-- ── INVITATIONS ───────────────────────────────────────────────
+create policy "admins can manage invitations" on invitations
+  for all using (has_family_role(family_id, array['admin']));
+create policy "public can read valid invitations" on invitations
+  for select using (status = 'pending' and expires_at > now());
 
-create trigger trg_patient_conditions_updated_at
-  before update on patient_conditions
-  for each row execute function set_updated_at();
+-- ── PATIENTS ──────────────────────────────────────────────────
+create policy "members can read patients" on patients
+  for select using (is_family_member(family_id) and deleted_at is null);
+create policy "editors can insert patients" on patients
+  for insert with check (has_family_role(family_id, array['admin','editor']));
+create policy "editors can update patients" on patients
+  for update using (has_family_role(family_id, array['admin','editor']) and deleted_at is null);
 
-create trigger trg_patient_allergies_updated_at
-  before update on patient_allergies
-  for each row execute function set_updated_at();
+-- ── PATIENT_CONDITIONS ────────────────────────────────────────
+create policy "members can read patient_conditions" on patient_conditions
+  for select using (
+    patient_id in (select p.id from patients p where is_family_member(p.family_id))
+    and deleted_at is null
+  );
+create policy "editors can insert patient_conditions" on patient_conditions
+  for insert with check (
+    patient_id in (select p.id from patients p where has_family_role(p.family_id, array['admin','editor']))
+  );
+create policy "editors can update patient_conditions" on patient_conditions
+  for update using (
+    patient_id in (select p.id from patients p where has_family_role(p.family_id, array['admin','editor']))
+    and deleted_at is null
+  );
 
-create trigger trg_emergency_contacts_updated_at
-  before update on emergency_contacts
-  for each row execute function set_updated_at();
+-- ── PATIENT_ALLERGIES ─────────────────────────────────────────
+create policy "members can read patient_allergies" on patient_allergies
+  for select using (
+    patient_id in (select p.id from patients p where is_family_member(p.family_id))
+    and deleted_at is null
+  );
+create policy "editors can insert patient_allergies" on patient_allergies
+  for insert with check (
+    patient_id in (select p.id from patients p where has_family_role(p.family_id, array['admin','editor']))
+  );
+create policy "editors can update patient_allergies" on patient_allergies
+  for update using (
+    patient_id in (select p.id from patients p where has_family_role(p.family_id, array['admin','editor']))
+    and deleted_at is null
+  );
 
-create trigger trg_medications_updated_at
-  before update on medications
-  for each row execute function set_updated_at();
+-- ── EMERGENCY_CONTACTS ────────────────────────────────────────
+create policy "members can read emergency_contacts" on emergency_contacts
+  for select using (
+    patient_id in (select p.id from patients p where is_family_member(p.family_id))
+    and deleted_at is null
+  );
+create policy "editors can insert emergency_contacts" on emergency_contacts
+  for insert with check (
+    patient_id in (select p.id from patients p where has_family_role(p.family_id, array['admin','editor']))
+  );
+create policy "editors can update emergency_contacts" on emergency_contacts
+  for update using (
+    patient_id in (select p.id from patients p where has_family_role(p.family_id, array['admin','editor']))
+    and deleted_at is null
+  );
 
-create trigger trg_appointments_updated_at
-  before update on appointments
-  for each row execute function set_updated_at();
+-- ── MEDICATIONS ───────────────────────────────────────────────
+create policy "members can read medications" on medications
+  for select using (
+    patient_id in (select p.id from patients p where is_family_member(p.family_id))
+    and deleted_at is null
+  );
+create policy "editors can insert medications" on medications
+  for insert with check (
+    patient_id in (select p.id from patients p where has_family_role(p.family_id, array['admin','editor']))
+  );
+create policy "editors can update medications" on medications
+  for update using (
+    patient_id in (select p.id from patients p where has_family_role(p.family_id, array['admin','editor']))
+    and deleted_at is null
+  );
 
-create trigger trg_clinical_events_updated_at
-  before update on clinical_events
-  for each row execute function set_updated_at();
+-- ── MEDICATION_LOGS ───────────────────────────────────────────
+create policy "members can read medication_logs" on medication_logs
+  for select using (
+    medication_id in (
+      select m.id from medications m
+      join patients p on p.id = m.patient_id
+      where is_family_member(p.family_id)
+        and m.deleted_at is null
+    )
+  );
+create policy "members can insert medication_logs" on medication_logs
+  for insert with check (
+    medication_id in (
+      select m.id from medications m
+      join patients p on p.id = m.patient_id
+      where is_family_member(p.family_id)
+    )
+  );
 
-create trigger trg_documents_updated_at
-  before update on documents
-  for each row execute function set_updated_at();
+-- ── APPOINTMENTS ──────────────────────────────────────────────
+create policy "members can read appointments" on appointments
+  for select using (
+    patient_id in (select p.id from patients p where is_family_member(p.family_id))
+    and deleted_at is null
+  );
+create policy "editors can insert appointments" on appointments
+  for insert with check (
+    patient_id in (select p.id from patients p where has_family_role(p.family_id, array['admin','editor']))
+  );
+create policy "editors can update appointments" on appointments
+  for update using (
+    patient_id in (select p.id from patients p where has_family_role(p.family_id, array['admin','editor']))
+    and deleted_at is null
+  );
 
-create trigger trg_emergency_links_updated_at
-  before update on emergency_links
-  for each row execute function set_updated_at();
+-- ── CLINICAL_EVENTS ───────────────────────────────────────────
+create policy "members can read clinical_events" on clinical_events
+  for select using (
+    patient_id in (select p.id from patients p where is_family_member(p.family_id))
+    and deleted_at is null
+  );
+create policy "editors can insert clinical_events" on clinical_events
+  for insert with check (
+    patient_id in (select p.id from patients p where has_family_role(p.family_id, array['admin','editor']))
+  );
+create policy "editors can update clinical_events" on clinical_events
+  for update using (
+    patient_id in (select p.id from patients p where has_family_role(p.family_id, array['admin','editor']))
+    and deleted_at is null
+  );
+
+-- ── DOCUMENTS ─────────────────────────────────────────────────
+create policy "members can read documents" on documents
+  for select using (
+    patient_id in (select p.id from patients p where is_family_member(p.family_id))
+    and deleted_at is null
+  );
+create policy "editors can insert documents" on documents
+  for insert with check (
+    patient_id in (select p.id from patients p where has_family_role(p.family_id, array['admin','editor']))
+  );
+create policy "editors can update documents" on documents
+  for update using (
+    patient_id in (select p.id from patients p where has_family_role(p.family_id, array['admin','editor']))
+    and deleted_at is null
+  );
+
+-- ── EMERGENCY_LINKS ───────────────────────────────────────────
+create policy "members can manage emergency_links" on emergency_links
+  for all using (
+    patient_id in (
+      select p.id from patients p
+      join family_members fm on fm.family_id = p.family_id
+      where fm.user_id = auth.uid() and fm.status = 'active'
+    )
+  );
+-- Leitura pública via token: tratada na Edge Function com service_role
+
+-- ── ACCESS_LOGS ───────────────────────────────────────────────
+-- Inserção apenas via Edge Function com service_role (sem policy de insert para authenticated)
+create policy "admins can read access_logs" on access_logs
+  for select using (
+    family_id in (
+      select family_id from family_members
+      where user_id = auth.uid() and role = 'admin' and status = 'active'
+    )
+  );
+
+-- =============================================================
+-- STORAGE — bucket medical-documents
+-- Executar no SQL Editor do Supabase APÓS criar o bucket como PRIVADO
+-- =============================================================
+
+-- create policy "members can access patient files" on storage.objects
+--   for all using (
+--     bucket_id = 'medical-documents'
+--     and (storage.foldername(name))[2] in (
+--       select p.id::text from patients p
+--       join family_members fm on fm.family_id = p.family_id
+--       where fm.user_id = auth.uid() and fm.status = 'active'
+--     )
+--   );
+--
+-- ⚠ Convenção de path obrigatória: patients/{patient_id}/.../{filename}
+-- O [2] acima extrai patient_id da segunda pasta do path.
+-- Criar o bucket como PRIVADO antes de aplicar esta política.
+-- O bucket deve ser nomeado exatamente: medical-documents
