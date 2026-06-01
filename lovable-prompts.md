@@ -18,13 +18,14 @@ Produto: Central operacional de saúde familiar para filhos adultos organizarem 
 Não é app de remédio. Não é prontuário médico. É coordenação familiar de saúde.
 
 Stack obrigatória:
-- Frontend: Lovable (React + Tailwind)
+- Frontend: Lovable Cloud (TanStack Start + React + Tailwind)
+- Roteamento: TanStack Start file-based em src/routes/ (NUNCA src/pages/)
 - Banco: Supabase Postgres
 - Auth: Supabase Auth
 - Storage: Supabase Storage
 - Permissões: Row Level Security (RLS) em todas as tabelas clínicas
-- Edge Functions: Supabase Edge Functions (operações com service_role)
-- Deploy: Vercel
+- Server Functions: TanStack createServerFn com supabaseAdmin (service_role) — equivalente às Edge Functions neste stack
+- Deploy: Cloudflare Workers (gerenciado pelo Lovable Cloud)
 
 Princípios inegociáveis:
 1. Mobile-first. Usuário típico: adulto 30-60 anos, celular, sob estresse.
@@ -32,27 +33,29 @@ Princípios inegociáveis:
 3. Dados clínicos usam soft delete (deleted_at), nunca deleção física.
 4. file_path no banco (nunca file_url). URL assinada gerada na aplicação.
 5. Busca de documentos sempre server-side via coluna gerada search_vector. Nunca carregar tudo no client.
-6. Log de emergência via Edge Function com service_role. Nunca UPDATE direto do client público.
+6. Log de emergência via Server Function (createServerFn + supabaseAdmin). Nunca UPDATE direto do client público.
 7. Ações em cards via botão ⋮ com bottom sheet. Nunca swipe-to-reveal.
 8. Upload mobile: câmera + galeria. Drag & drop só no desktop.
 9. Nunca aceitar HEIC no upload — usar apenas JPEG, PNG e PDF.
 10. Schema obrigatório do campo schedule em medications: { "times": ["08:00", "14:00"] } — nunca usar outro formato ou chave diferente.
 11. Nunca verificar existência de e-mail no frontend para decidir branch de convite — exibir sempre os dois botões.
 
-Variáveis de ambiente (configurar no Lovable antes de qualquer prompt):
-- VITE_SUPABASE_URL: URL do projeto Supabase
-- VITE_SUPABASE_ANON_KEY: chave anon pública do Supabase
-A Edge Function usa SUPABASE_SERVICE_ROLE_KEY (configurar nos secrets da Edge Function no Supabase).
+Variáveis de ambiente:
+- VITE_SUPABASE_URL: provisionada automaticamente pelo Lovable Cloud
+- VITE_SUPABASE_PUBLISHABLE_KEY: nome correto da anon key no Lovable Cloud (não VITE_SUPABASE_ANON_KEY)
+- SUPABASE_SERVICE_ROLE_KEY: configurar nos Environment Secrets do projeto Lovable (nunca expor no client)
+  — usar dentro de createServerFn handlers, nunca no module scope
+
+Nota: o client Supabase gerado pelo Lovable (src/integrations/supabase/client.ts) já lê VITE_SUPABASE_PUBLISHABLE_KEY automaticamente. Não sobrescrever esse arquivo.
 
 Dependências a instalar no projeto:
 - qrcode.react (geração de QR Code na Central de Emergência)
 - react-pdf (visualização de PDF com fallback window.open)
 
-Pré-requisitos antes de executar qualquer prompt:
-- Projeto Supabase criado na região sa-east-1 (LGPD Brasil)
-- Extensão pgcrypto ativada no Supabase (necessária para gen_random_bytes)
-- Bucket medical-documents criado como PRIVADO no Supabase Storage
-- Domínios de redirect configurados no Supabase Auth (localhost + produção)
+Pré-requisitos:
+- Extensão pgcrypto ativada (inclua no início da migration: CREATE EXTENSION IF NOT EXISTS pgcrypto;)
+- Bucket medical-documents criado como PRIVADO via migration SQL ou SQL Editor do Supabase
+- Lovable Cloud gerencia a região e o projeto Supabase — não é necessário acessar o dashboard do Supabase manualmente
 
 Bottom nav fixa: Home | Medicamentos | Agenda | Documentos | Família
 Perfil: avatar no header.
@@ -572,6 +575,9 @@ create trigger on_auth_user_created
 
 ## 4. Estrutura de pastas do projeto
 
+IMPORTANTE: Lovable Cloud usa TanStack Start com roteamento file-based em src/routes/.
+NUNCA usar src/pages/ — quebraria o build e os links tipados.
+
 Organize o projeto com:
 /src
   /components
@@ -583,15 +589,20 @@ Organize o projeto com:
     /documents   -- upload, viewer, busca
     /emergency   -- página pública, botão, QR code
     /family      -- membros, convites, permissões
-  /pages
-    /auth        -- login, registro, recuperação
-    /onboarding  -- 5 passos
-    /dashboard   -- home
-    /emergency-public -- página pública sem autenticação
+  /routes
+    /auth        -- login.tsx, registro.tsx, recuperacao.tsx
+    /onboarding  -- familia.tsx, familiar.tsx, emergencia.tsx
+    index.tsx    -- dashboard (home)
+    e.$token.tsx -- página pública de emergência (sem autenticação)
+    convite.$token.tsx -- aceite de convite
   /hooks         -- useFamily, usePatient, useDocuments etc.
   /lib
-    /supabase    -- client, storage helpers, signed URLs
+    supabase-admin.ts  -- createClient com service_role (só em server functions)
+    storage.ts         -- helpers de signed URL
     /utils
+  /functions             -- server functions com createServerFn
+    emergency.functions.ts   -- logEmergencyAccess
+    onboarding.functions.ts  -- createFamilyWithAdmin (resolve deadlock de RLS)
 
 ## 5. Resultado esperado deste prompt
 
@@ -599,9 +610,10 @@ Ao concluir:
 - Migration executada sem erros no Supabase
 - RLS ativo em todas as tabelas
 - Trigger de profiles funcionando
-- Estrutura de pastas criada
-- Cliente Supabase configurado
-- Rotas base definidas
+- Estrutura de pastas criada com src/routes/ (não src/pages/)
+- Cliente Supabase configurado (usar o client gerado em src/integrations/supabase/client.ts)
+- supabaseAdmin criado em src/lib/supabase-admin.ts (só usado dentro de server function handlers)
+- Rotas base definidas com convenção dot-separated do TanStack (ex: auth/login.tsx, onboarding/familia.tsx)
 
 Não crie nenhuma UI ainda. Apenas fundação.
 ```
@@ -649,10 +661,34 @@ Campos:
 - Seu papel: radio buttons horizontais
   - Filho(a) / Cônjuge / Cuidador(a) / Outro
 
-Ao salvar:
-- INSERT em families com created_by = auth.uid()
-- INSERT em family_members com role = 'admin', status = 'active'
-- UPDATE profiles SET onboarding_step = 1 WHERE id = auth.uid()
+Ao salvar — OBRIGATÓRIO usar Server Function (não client direto):
+
+A política RLS de family_members exige que o usuário já seja admin para inserir registros,
+mas o próprio INSERT do primeiro admin é quem cria essa condição — deadlock.
+Para resolver, criar src/functions/onboarding.functions.ts com createServerFn usando supabaseAdmin:
+
+    export const createFamilyWithAdmin = createServerFn()
+      .validator((data: { userId: string; familyName: string }) => data)
+      .handler(async ({ data: { userId, familyName } }) => {
+        const supabaseAdmin = getAdminClient()
+        const { data: family } = await supabaseAdmin
+          .from('families')
+          .insert({ name: familyName, created_by: userId })
+          .select('id')
+          .single()
+        await supabaseAdmin.from('family_members').insert({
+          family_id: family!.id, user_id: userId, role: 'admin', status: 'active',
+        })
+        await supabaseAdmin
+          .from('profiles')
+          .update({ onboarding_step: 1 })
+          .eq('id', userId)
+        return family
+      })
+
+- INSERT em families com created_by = auth.uid() (via server function)
+- INSERT em family_members com role = 'admin', status = 'active' (via server function — bypassa RLS)
+- UPDATE profiles SET onboarding_step = 1 (via server function)
 - Redirecionar para Passo 4
 
 ## Passo 4 — Adicionar familiar cuidado (obrigatório)
@@ -1016,8 +1052,8 @@ Regras de carregamento:
 1. Buscar emergency_link pelo token
 2. Validar: is_active = true AND (expires_at IS NULL OR expires_at > now())
 3. Se inválido: tela "Este link não está mais disponível"
-4. Se válido: chamar Edge Function (ver abaixo) para registrar acesso e obter dados
-5. Renderizar com os dados retornados pela Edge Function
+4. Se válido: chamar Server Function (ver abaixo) para registrar acesso e obter dados
+5. Renderizar com os dados retornados pela Server Function
 
 ORDEM OBRIGATÓRIA das seções:
 
@@ -1056,47 +1092,109 @@ Performance e cache:
 - Se offline: mostrar banner "⚠ Você está offline. Estas informações podem não estar atualizadas." + dados do cache
 - Cache válido por 24 horas
 
-## D. Edge Function — log de acesso (/functions/v1/log-emergency-access)
+## D. Server Function — log de acesso (src/functions/emergency.functions.ts)
 
-CORS obrigatório — incluir no início, antes de qualquer lógica:
+IMPORTANTE: Lovable Cloud não usa Supabase Edge Functions. O equivalente é createServerFn do TanStack Start.
+Roda no mesmo Cloudflare Worker do app — sem CORS, sem deploy separado.
 
-    const corsHeaders = {
-      'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+Criar o arquivo src/functions/emergency.functions.ts:
+
+    import { createServerFn } from '@tanstack/react-start'
+    import { createClient } from '@supabase/supabase-js'
+
+    // supabaseAdmin só pode ser instanciado dentro do handler (env injetado por request no Workers)
+    function getAdminClient() {
+      return createClient(
+        process.env.VITE_SUPABASE_URL!,
+        process.env.SUPABASE_SERVICE_ROLE_KEY!
+      )
     }
-    if (req.method === 'OPTIONS') {
-      return new Response('ok', { headers: corsHeaders })
-    }
 
-Incluir corsHeaders em TODAS as respostas retornadas. Sem CORS, a chamada falhará.
+    export const logEmergencyAccess = createServerFn()
+      .validator((data: { token: string; ip_address: string; user_agent: string }) => data)
+      .handler(async ({ data: { token, ip_address, user_agent } }) => {
+        const supabaseAdmin = getAdminClient()
 
-Lógica da Edge Function:
-1. Receber: { token, ip_address, user_agent }
-2. Buscar e validar emergency_link pelo token
-3. INSERT em access_logs com ip_address e user_agent
-4. UPDATE emergency_links SET access_count = access_count + 1
-5. Carregar dados do paciente e retornar patient_data com os campos permitidos:
-   - name, photo_url, birth_date, blood_type
-   - allergies: [{ allergy, severity }] — deleted_at IS NULL
-   - medications: [{ name, generic_name, dosage, frequency }] — status='active', deleted_at IS NULL
-   - conditions: [{ name }] — status='active'
-   - health_insurance_name, preferred_hospital
-   - emergency_contacts: [{ name, relationship, phone }] — ordered by priority, deleted_at IS NULL
-   - document_urls: [{ title, type, signed_url }] — máx 5 recentes, signed_url gerada pela Edge Function via service_role
-6. Para documentos: gerar signed URLs usando supabaseAdmin.storage.from('medical-documents').createSignedUrl()
-   (o client anônimo não pode assinar arquivos — obrigatório usar service_role aqui)
+        // 1. Buscar e validar emergency_link pelo token
+        const { data: link } = await supabaseAdmin
+          .from('emergency_links')
+          .select('id, patient_id, is_active, expires_at')
+          .eq('token', token)
+          .single()
 
-Chamar via:
-    const { data } = await supabase.functions.invoke('log-emergency-access', {
-      body: { token, ip_address, user_agent: navigator.userAgent }
+        if (!link || !link.is_active || (link.expires_at && new Date(link.expires_at) < new Date())) {
+          throw new Error('LINK_INVALID')
+        }
+
+        // 2. INSERT em access_logs
+        await supabaseAdmin.from('access_logs').insert({
+          emergency_link_id: link.id,
+          patient_id: link.patient_id,
+          action: 'emergency_view',
+          resource_type: 'emergency_link',
+          resource_id: link.id,
+          ip_address,
+          user_agent,
+        })
+
+        // 3. UPDATE access_count
+        await supabaseAdmin
+          .from('emergency_links')
+          .update({ access_count: supabaseAdmin.rpc('increment', { x: 1 }) })
+          .eq('id', link.id)
+
+        // 4. Carregar dados do paciente
+        const { data: patient } = await supabaseAdmin
+          .from('patients')
+          .select(`
+            name, photo_url, birth_date, blood_type,
+            health_insurance_name, health_insurance_number, preferred_hospital,
+            patient_allergies!inner(allergy, severity),
+            patient_conditions!inner(name, status),
+            emergency_contacts!inner(name, relationship, phone, priority),
+            medications!inner(name, generic_name, dosage, frequency, status),
+            documents!inner(id, title, type, file_path, document_date)
+          `)
+          .eq('id', link.patient_id)
+          .single()
+
+        // 5. Gerar signed URLs para documentos (obrigatório usar supabaseAdmin — anon não pode)
+        const docs = (patient?.documents ?? [])
+          .filter((d: any) => d.file_path)
+          .slice(0, 5)
+        const document_urls = await Promise.all(
+          docs.map(async (d: any) => {
+            const { data: signed } = await supabaseAdmin.storage
+              .from('medical-documents')
+              .createSignedUrl(d.file_path, 3600)
+            return { title: d.title, type: d.type, signed_url: signed?.signedUrl ?? null }
+          })
+        )
+
+        return {
+          ...patient,
+          allergies: (patient?.patient_allergies ?? []).filter((a: any) => !a.deleted_at),
+          medications: (patient?.medications ?? []).filter((m: any) => m.status === 'active'),
+          conditions: (patient?.patient_conditions ?? []).filter((c: any) => c.status === 'active'),
+          emergency_contacts: [...(patient?.emergency_contacts ?? [])].sort((a: any, b: any) => a.priority - b.priority),
+          document_urls,
+        }
+      })
+
+Chamar na página pública:
+    import { logEmergencyAccess } from '~/functions/emergency.functions'
+
+    const patientData = await logEmergencyAccess({
+      data: { token, ip_address: '', user_agent: navigator.userAgent }
     })
 
-A página pública NUNCA faz UPDATE direto. Sempre via esta Edge Function.
+NÃO usar supabase.functions.invoke() — não há Edge Functions neste stack.
+A página pública NUNCA faz UPDATE direto. Sempre via esta Server Function.
 
 ## Critérios de aceite
 - Página pública carrega em < 1,5 segundos
 - Ordem das seções exatamente como especificado
-- UPDATE de access_count APENAS via Edge Function
+- UPDATE de access_count APENAS via Server Function (logEmergencyAccess)
 - Cache funciona mesmo offline
 - QR Code disponível para download
 - Link pode ser desativado pelo admin
@@ -1323,7 +1421,7 @@ Ao concluir todos os 11 prompts, o Amparo deve:
 - Ter soft delete funcionando em patients, medications, appointments, clinical_events, documents
 - Ter upload correto (file_path, não file_url)
 - Ter busca de documentos server-side via search_vector
-- Ter página de emergência com cache e Edge Function para log
+- Ter página de emergência com cache e Server Function (createServerFn) para log
 - Ter fluxo de convite com 3 branches
 - Ter confirmação de realizado em 2 etapas
 - Ter reordenação de contatos via botões ↑↓
