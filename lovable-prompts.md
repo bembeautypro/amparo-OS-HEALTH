@@ -924,7 +924,7 @@ Crie o módulo de Histórico Clínico do Amparo.
 - Filtros como chips horizontais: tipo + gravidade
 - FAB (+) para adicionar evento
 - Lista cronológica decrescente com deleted_at IS NULL
-- Barra de busca
+- Barra de busca com debounce 300ms; buscar via ILIKE em title e description (clinical_events não tem search_vector — usar .or('title.ilike.%query%,description.ilike.%query%'))
 
 Card de evento:
 - Linha vertical colorida à esquerda (cor por gravidade: cinza/azul/laranja/vermelho)
@@ -934,7 +934,19 @@ Card de evento:
 ## Formulário — Adicionar evento clínico
 
 Campos:
-- Tipo: select com 12 opções em pt-BR (consulta, exame, internação, cirurgia, sintoma, queda/acidente, alteração de medicamento, diagnóstico, retorno médico, crise, vacina, observação familiar)
+- Tipo: select com 12 opções em pt-BR — usar EXATAMENTE os valores do CHECK constraint do banco:
+  - 'consultation' → Consulta
+  - 'exam' → Exame
+  - 'hospitalization' → Internação
+  - 'surgery' → Cirurgia
+  - 'symptom' → Sintoma
+  - 'fall_accident' → Queda ou acidente
+  - 'medication_change' → Alteração de medicamento
+  - 'diagnosis' → Diagnóstico
+  - 'return' → Retorno médico  ← NÃO usar 'followup' (erro comum)
+  - 'crisis' → Crise
+  - 'vaccine' → Vacina
+  - 'family_note' → Observação familiar
 - Data do evento / Título (obrigatório) / Descrição
 - Gravidade: radio buttons coloridos ⚪ Baixa | 🔵 Média | 🟠 Alta | 🔴 Crítica
 - Tags (campo livre, múltiplas) / Médico relacionado
@@ -1369,9 +1381,9 @@ Cache válido por 24 horas.
 ## 4. Disclaimer obrigatório
 
 Adicionar em 3 locais:
-1. Footer da página pública de emergência
+1. Footer da página pública de emergência (/e/$token) — já implementado
 2. Telas com IA ou resumo (P1)
-3. Tela de medicamentos (interações — P1)
+3. Tela de medicamentos — footer abaixo da BottomNav, acima da nav
 
 Texto padrão:
 "O Amparo organiza informações e oferece apoio contextual. Ele não substitui médicos,
